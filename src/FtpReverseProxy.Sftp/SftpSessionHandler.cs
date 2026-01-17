@@ -23,6 +23,7 @@ public class SftpSessionHandler : IDisposable
     private string? _username;
     private string? _password;
     private BackendServer? _backendServer;
+    private RouteMapping? _routeMapping;
     private SftpClient? _backendClient;
     private SftpProxy? _sftpProxy;
     private SessionChannel? _clientChannel;
@@ -78,6 +79,7 @@ public class SftpSessionHandler : IDisposable
         if (result.Success)
         {
             _backendServer = result.Server;
+            _routeMapping = result.Route;
             args.Result = true;
             _logger.LogDebug("SFTP authentication accepted for {Username}, routing to {Backend}",
                 _username, _backendServer?.Name);
@@ -89,7 +91,7 @@ public class SftpSessionHandler : IDisposable
         }
     }
 
-    private (bool Success, BackendServer? Server) ResolveBackend(string username)
+    private (bool Success, BackendServer? Server, RouteMapping? Route) ResolveBackend(string username)
     {
         // Try to get routing service
         var routingService = _serviceProvider.GetService<IRoutingService>();
@@ -108,9 +110,14 @@ public class SftpSessionHandler : IDisposable
                     var backend = routingService.GetBackendAsync(route.BackendServerId, CancellationToken.None)
                         .GetAwaiter().GetResult();
 
-                    if (backend is not null)
+                    if (backend is not null && backend.IsEnabled)
                     {
-                        return (true, backend);
+                        return (true, backend, route);
+                    }
+
+                    if (backend is not null && !backend.IsEnabled)
+                    {
+                        _logger.LogWarning("Backend server {Backend} is disabled", backend.Name);
                     }
                 }
             }
@@ -133,7 +140,7 @@ public class SftpSessionHandler : IDisposable
             // For development/testing, could create a test backend here
         }
 
-        return (false, null);
+        return (false, null, null);
     }
 
     private void OnCommandOpened(object? sender, CommandRequestedArgs args)
@@ -172,7 +179,7 @@ public class SftpSessionHandler : IDisposable
 
     private bool ConnectToBackend()
     {
-        if (_backendServer is null || _username is null)
+        if (_backendServer is null || _username is null || _routeMapping is null)
         {
             return false;
         }
@@ -180,17 +187,38 @@ public class SftpSessionHandler : IDisposable
         try
         {
             // Parse actual username if format is user@backend
-            var actualUsername = _username;
+            var parsedUsername = _username;
             var atIndex = _username.LastIndexOf('@');
             if (atIndex > 0)
             {
-                actualUsername = _username[..atIndex];
+                parsedUsername = _username[..atIndex];
             }
 
-            // Use the password captured from FxSsh.PwAuth authentication
-            var password = _password ?? string.Empty;
+            // Use credential mapper to get proper credentials
+            var credentialMapper = _serviceProvider.GetService<ICredentialMapper>();
+            string backendUsername;
+            string backendPassword;
 
-            if (string.IsNullOrEmpty(password))
+            if (credentialMapper is not null)
+            {
+                var credentials = credentialMapper.MapCredentialsAsync(
+                    parsedUsername,
+                    _password ?? string.Empty,
+                    _routeMapping,
+                    _backendServer,
+                    CancellationToken.None).GetAwaiter().GetResult();
+
+                backendUsername = credentials.Username;
+                backendPassword = credentials.Password;
+            }
+            else
+            {
+                // Fallback to direct passthrough
+                backendUsername = _routeMapping.BackendUsername ?? parsedUsername;
+                backendPassword = _routeMapping.BackendPassword ?? _password ?? string.Empty;
+            }
+
+            if (string.IsNullOrEmpty(backendPassword))
             {
                 _logger.LogWarning("No password available for backend authentication. " +
                     "Client may have used public key auth which cannot be proxied to password-based backend.");
@@ -200,8 +228,8 @@ public class SftpSessionHandler : IDisposable
             var connectionInfo = new ConnectionInfo(
                 _backendServer.Host,
                 _backendServer.Port,
-                actualUsername,
-                new PasswordAuthenticationMethod(actualUsername, password))
+                backendUsername,
+                new PasswordAuthenticationMethod(backendUsername, backendPassword))
             {
                 Timeout = TimeSpan.FromMilliseconds(_backendServer.ConnectionTimeoutMs)
             };
@@ -210,7 +238,7 @@ public class SftpSessionHandler : IDisposable
             _backendClient.Connect();
 
             _logger.LogInformation("Connected to backend SFTP server {Backend} as {User}",
-                _backendServer.Name, actualUsername);
+                _backendServer.Name, backendUsername);
             return true;
         }
         catch (Exception ex)

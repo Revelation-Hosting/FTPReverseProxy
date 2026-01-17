@@ -1,0 +1,114 @@
+# Test docker-compose for end-to-end testing
+# Includes a test FTP server as a backend
+#
+# Usage:
+#   docker-compose -f docker-compose.test.yml up --build
+#
+# After starting, create a route via the API:
+#   curl -X POST http://localhost:8080/api/backends \
+#     -H "Content-Type: application/json" \
+#     -d '{"name":"test-ftp","host":"test-ftp-server","port":21}'
+#
+#   curl -X POST http://localhost:8080/api/routes \
+#     -H "Content-Type: application/json" \
+#     -d '{"username":"testuser","backendServerId":"<backend-id>"}'
+#
+# Then test FTP:
+#   ftp localhost 21
+#   > USER testuser
+#   > PASS testpass
+
+services:
+  # Management API - handles database migrations
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: ftp-proxy-api-test
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - DOTNET_ENVIRONMENT=Development
+      - AutoMigrate=true
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=ftpproxy;Username=ftpproxy;Password=ftpproxy
+      - DatabaseProvider=PostgreSQL
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ftp-proxy-test-network
+
+  # FTP Proxy Service
+  ftp-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ftp-proxy-test
+    restart: unless-stopped
+    ports:
+      - "21:21"
+      - "50000-50010:50000-50010"
+    environment:
+      - Logging__LogLevel__Default=Debug
+      - Logging__LogLevel__FtpReverseProxy=Debug
+      - Proxy__Ftp__Enabled=true
+      - Proxy__Ftp__ListenAddress=0.0.0.0
+      - Proxy__Ftp__Port=21
+      - Proxy__FtpsImplicit__Enabled=false
+      - Proxy__Sftp__Enabled=false
+      - Proxy__DataChannel__MinPort=50000
+      - Proxy__DataChannel__MaxPort=50010
+      - Proxy__Database__Provider=PostgreSQL
+      - Proxy__Database__ConnectionString=Host=postgres;Database=ftpproxy;Username=ftpproxy;Password=ftpproxy
+      - Proxy__Redis__Enabled=false
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks:
+      - ftp-proxy-test-network
+
+  # Test FTP Server (backend)
+  test-ftp-server:
+    image: delfer/alpine-ftp-server:latest
+    container_name: test-ftp-server
+    restart: unless-stopped
+    environment:
+      - USERS=testuser|testpass|/home/testuser
+      - MIN_PORT=30000
+      - MAX_PORT=30009
+    volumes:
+      - test-ftp-data:/home/testuser
+    networks:
+      - ftp-proxy-test-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: ftp-proxy-postgres-test
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=ftpproxy
+      - POSTGRES_USER=ftpproxy
+      - POSTGRES_PASSWORD=ftpproxy
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+    networks:
+      - ftp-proxy-test-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ftpproxy -d ftpproxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres-test-data:
+  test-ftp-data:
+
+networks:
+  ftp-proxy-test-network:
+    driver: bridge

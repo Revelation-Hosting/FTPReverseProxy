@@ -2,6 +2,7 @@ using FtpReverseProxy.Core.Configuration;
 using FtpReverseProxy.Data;
 using FtpReverseProxy.Ftp;
 using FtpReverseProxy.Service;
+using FtpReverseProxy.Sftp;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -34,6 +35,9 @@ builder.Services.AddFtpProxyServices(options =>
     options.CertificatePath = proxyConfig.TlsCertificate?.Path;
     options.CertificatePassword = proxyConfig.TlsCertificate?.Password;
 });
+
+// Add SFTP services
+builder.Services.AddSftpProxyServices();
 
 builder.Services.AddHostedService<Worker>();
 
