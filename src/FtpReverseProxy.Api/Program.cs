@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using FtpReverseProxy.Api.Models;
 using FtpReverseProxy.Data;
 using FtpReverseProxy.Data.Entities;
@@ -6,6 +7,12 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure JSON to accept string enum values
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
 
 // Configure database
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")

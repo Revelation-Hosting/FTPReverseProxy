@@ -196,7 +196,6 @@ GET /api/backends
 # Create a backend
 POST /api/backends
 {
-  "id": "backend-1",
   "name": "Production FTP",
   "host": "ftp.internal.local",
   "port": 21,
@@ -211,40 +210,41 @@ PUT /api/backends/{id}
 DELETE /api/backends/{id}
 ```
 
-### Routing Rules
+### Route Mappings
 
 ```bash
-# List all routing rules
-GET /api/routingrules
+# List all routes
+GET /api/routes
 
-# Create a routing rule
-POST /api/routingrules
+# Create a route mapping
+POST /api/routes
 {
-  "backendServerId": "backend-1",
-  "matchType": "Suffix",
-  "pattern": "@prod",
-  "priority": 10,
+  "username": "john@prod",
+  "backendServerId": "your-backend-id",
+  "backendUsername": "john",
   "isEnabled": true,
-  "credentialMapping": {
-    "mappingType": "Passthrough"
-  }
+  "priority": 100,
+  "description": "Route for john to production"
 }
+
+# Lookup route for a username
+GET /api/routes/lookup/{username}
+
+# Update a route
+PUT /api/routes/{id}
+
+# Delete a route
+DELETE /api/routes/{id}
 ```
 
-### Routing Match Types
+### Route Mapping Fields
 
-- `Suffix`: Match username suffix (e.g., `user@backend`)
-- `Prefix`: Match username prefix (e.g., `backend_user`)
-- `Exact`: Exact username match
-- `Regex`: Regular expression pattern
-- `Domain`: Domain-based routing (e.g., `user@domain.com`)
-
-### Credential Mapping Types
-
-- `Passthrough`: Use client credentials as-is
-- `ServiceAccount`: Use fixed credentials for backend
-- `MappedUsername`: Map to different username, same password
-- `FullyMapped`: Map both username and password
+- `username`: The FTP username to match (exact match)
+- `backendServerId`: ID of the target backend server
+- `backendUsername`: (Optional) Username to use when connecting to backend
+- `backendPassword`: (Optional) Password to use when connecting to backend
+- `priority`: Lower values = higher priority (default: 100)
+- `isEnabled`: Whether this route is active
 
 ## Metrics
 
