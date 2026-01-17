@@ -137,6 +137,12 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IRoutingService, CachedRoutingService>();
         services.AddScoped<ICredentialMapper, CredentialMapper>();
 
+        // Connection tracking (singleton for state persistence)
+        services.AddSingleton<IConnectionTracker, ConnectionTracker>();
+
+        // Metrics (singleton)
+        services.AddSingleton<IProxyMetrics, ProxyMetrics>();
+
         return services;
     }
 }

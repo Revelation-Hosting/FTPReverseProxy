@@ -1,7 +1,9 @@
 using FtpReverseProxy.Api.Models;
 using FtpReverseProxy.Data;
 using FtpReverseProxy.Data.Entities;
+using FtpReverseProxy.Data.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Distributed;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,6 +25,24 @@ builder.Services.AddDbContext<FtpProxyDbContext>(options =>
         options.UseNpgsql(connectionString);
     }
 });
+
+// Configure Redis cache for cache invalidation (if available)
+var redisConnection = builder.Configuration.GetValue<string>("Redis:ConnectionString")
+    ?? Environment.GetEnvironmentVariable("REDIS_CONNECTION_STRING");
+
+if (!string.IsNullOrEmpty(redisConnection))
+{
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = redisConnection;
+        options.InstanceName = "FtpProxy:";
+    });
+}
+else
+{
+    // Use in-memory cache if Redis not configured
+    builder.Services.AddDistributedMemoryCache();
+}
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -168,13 +188,15 @@ app.MapPost("/api/backends", async (CreateBackendServerRequest request, FtpProxy
 .WithTags("Backend Servers")
 ;
 
-app.MapPut("/api/backends/{id}", async (string id, UpdateBackendServerRequest request, FtpProxyDbContext db) =>
+app.MapPut("/api/backends/{id}", async (string id, UpdateBackendServerRequest request, FtpProxyDbContext db, IDistributedCache cache) =>
 {
     var backend = await db.BackendServers.FindAsync(id);
     if (backend is null)
     {
         return Results.NotFound();
     }
+
+    var oldName = backend.Name;
 
     // Check for duplicate name (excluding current)
     if (await db.BackendServers.AnyAsync(b => b.Name == request.Name && b.Id != id))
@@ -197,13 +219,21 @@ app.MapPut("/api/backends/{id}", async (string id, UpdateBackendServerRequest re
 
     await db.SaveChangesAsync();
 
+    // Invalidate cache
+    await cache.RemoveAsync($"backend:{id}");
+    await cache.RemoveAsync($"backend_name:{oldName}");
+    if (oldName != request.Name)
+    {
+        await cache.RemoveAsync($"backend_name:{request.Name}");
+    }
+
     return Results.NoContent();
 })
 .WithName("UpdateBackendServer")
 .WithTags("Backend Servers")
 ;
 
-app.MapDelete("/api/backends/{id}", async (string id, FtpProxyDbContext db) =>
+app.MapDelete("/api/backends/{id}", async (string id, FtpProxyDbContext db, IDistributedCache cache) =>
 {
     var backend = await db.BackendServers.FindAsync(id);
     if (backend is null)
@@ -211,8 +241,13 @@ app.MapDelete("/api/backends/{id}", async (string id, FtpProxyDbContext db) =>
         return Results.NotFound();
     }
 
+    var backendName = backend.Name;
     db.BackendServers.Remove(backend);
     await db.SaveChangesAsync();
+
+    // Invalidate cache
+    await cache.RemoveAsync($"backend:{id}");
+    await cache.RemoveAsync($"backend_name:{backendName}");
 
     return Results.NoContent();
 })
@@ -336,13 +371,15 @@ app.MapPost("/api/routes", async (CreateRouteMappingRequest request, FtpProxyDbC
 .WithTags("Route Mappings")
 ;
 
-app.MapPut("/api/routes/{id}", async (string id, UpdateRouteMappingRequest request, FtpProxyDbContext db) =>
+app.MapPut("/api/routes/{id}", async (string id, UpdateRouteMappingRequest request, FtpProxyDbContext db, IDistributedCache cache) =>
 {
     var route = await db.RouteMappings.FindAsync(id);
     if (route is null)
     {
         return Results.NotFound();
     }
+
+    var oldUsername = route.Username;
 
     // Verify backend exists
     if (!await db.BackendServers.AnyAsync(b => b.Id == request.BackendServerId))
@@ -361,13 +398,20 @@ app.MapPut("/api/routes/{id}", async (string id, UpdateRouteMappingRequest reque
 
     await db.SaveChangesAsync();
 
+    // Invalidate cache for old and new usernames
+    await cache.RemoveAsync($"route:{oldUsername}");
+    if (oldUsername != request.Username)
+    {
+        await cache.RemoveAsync($"route:{request.Username}");
+    }
+
     return Results.NoContent();
 })
 .WithName("UpdateRouteMapping")
 .WithTags("Route Mappings")
 ;
 
-app.MapDelete("/api/routes/{id}", async (string id, FtpProxyDbContext db) =>
+app.MapDelete("/api/routes/{id}", async (string id, FtpProxyDbContext db, IDistributedCache cache) =>
 {
     var route = await db.RouteMappings.FindAsync(id);
     if (route is null)
@@ -375,8 +419,12 @@ app.MapDelete("/api/routes/{id}", async (string id, FtpProxyDbContext db) =>
         return Results.NotFound();
     }
 
+    var username = route.Username;
     db.RouteMappings.Remove(route);
     await db.SaveChangesAsync();
+
+    // Invalidate cache
+    await cache.RemoveAsync($"route:{username}");
 
     return Results.NoContent();
 })

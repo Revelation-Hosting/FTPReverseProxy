@@ -32,6 +32,8 @@ public class FtpSessionHandler : IDisposable
     private string? _pendingUsername;
     private IBackendConnection? _backendConnection;
     private IDataChannelManager? _dataChannelManager;
+    private bool _connectionAcquired;
+    private IProxyMetrics? _metrics;
 
     // Commands that trigger data transfer
     private static readonly HashSet<string> DataTransferCommands = new(StringComparer.OrdinalIgnoreCase)
@@ -70,6 +72,10 @@ public class FtpSessionHandler : IDisposable
         };
         _sessionManager.RegisterSession(_session);
 
+        // Get metrics service
+        _metrics = _serviceProvider.GetService<IProxyMetrics>();
+        _metrics?.RecordConnectionOpened(_protocol.ToString(), null);
+
         // Get data channel manager
         _dataChannelManager = _serviceProvider.GetRequiredService<IDataChannelManager>();
 
@@ -98,6 +104,24 @@ public class FtpSessionHandler : IDisposable
             _dataChannelManager.CancelDataChannel(_session.Id);
             _sessionManager.RemoveSession(_session.Id);
             _session.State = SessionState.Closed;
+
+            // Release connection slot if acquired
+            if (_connectionAcquired && _session.Backend is not null)
+            {
+                var connectionTracker = _serviceProvider.GetService<IConnectionTracker>();
+                connectionTracker?.ReleaseConnection(_session.Backend.Id);
+                _connectionAcquired = false;
+            }
+
+            // Record connection closed
+            _metrics?.RecordConnectionClosed(_protocol.ToString(), _session.Backend?.Id);
+
+            // Record bytes transferred
+            if (_session.BytesUploaded > 0 || _session.BytesDownloaded > 0)
+            {
+                _metrics?.RecordBytesTransferred("upload", _session.BytesUploaded, _session.Backend?.Id);
+                _metrics?.RecordBytesTransferred("download", _session.BytesDownloaded, _session.Backend?.Id);
+            }
         }
     }
 
@@ -247,6 +271,18 @@ public class FtpSessionHandler : IDisposable
 
             _session.Backend = backend;
 
+            // Try to acquire a connection slot
+            var connectionTracker = _serviceProvider.GetRequiredService<IConnectionTracker>();
+            if (!connectionTracker.TryAcquireConnection(backend.Id, backend.MaxConnections))
+            {
+                _logger.LogWarning("Connection limit reached for backend {Backend}", backend.Name);
+                await SendResponseAsync(FtpResponseParser.Codes.ServiceNotAvailable,
+                    "Backend server at capacity");
+                _session.State = SessionState.Connected;
+                return;
+            }
+            _connectionAcquired = true;
+
             // Map credentials
             var credentialMapper = _serviceProvider.GetRequiredService<ICredentialMapper>();
             var credentials = await credentialMapper.MapCredentialsAsync(
@@ -270,6 +306,9 @@ public class FtpSessionHandler : IDisposable
             // Authenticate with backend
             var authSuccess = await _backendConnection.AuthenticateAsync(credentials, cancellationToken);
 
+            // Record authentication result
+            _metrics?.RecordAuthentication(authSuccess, _protocol.ToString(), backend.Id);
+
             if (authSuccess)
             {
                 _session.State = SessionState.Active;
@@ -285,6 +324,13 @@ public class FtpSessionHandler : IDisposable
                 _session.State = SessionState.Connected;
                 await _backendConnection.DisconnectAsync();
                 _backendConnection = null;
+
+                // Release connection slot on auth failure
+                if (_connectionAcquired)
+                {
+                    connectionTracker.ReleaseConnection(backend.Id);
+                    _connectionAcquired = false;
+                }
             }
         }
         catch (Exception ex)
@@ -292,6 +338,14 @@ public class FtpSessionHandler : IDisposable
             _logger.LogError(ex, "Error during authentication for user {Username}", _pendingUsername);
             await SendResponseAsync(FtpResponseParser.Codes.ServiceNotAvailable, "Authentication error");
             _session.State = SessionState.Connected;
+
+            // Release connection slot on error
+            if (_connectionAcquired && _session.Backend is not null)
+            {
+                var connectionTracker = _serviceProvider.GetService<IConnectionTracker>();
+                connectionTracker?.ReleaseConnection(_session.Backend.Id);
+                _connectionAcquired = false;
+            }
         }
     }
 
@@ -317,6 +371,15 @@ public class FtpSessionHandler : IDisposable
         if (string.Equals(command.Argument, "TLS", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(command.Argument, "SSL", StringComparison.OrdinalIgnoreCase))
         {
+            // Check if TLS certificate is available
+            var certProvider = _serviceProvider.GetService<ICertificateProvider>();
+            if (certProvider is null || !certProvider.HasCertificate)
+            {
+                await SendResponseAsync(FtpResponseParser.Codes.CommandNotImplemented,
+                    "TLS not available - no certificate configured");
+                return;
+            }
+
             await SendResponseAsync(FtpResponseParser.Codes.SecurityDataExchange, "AUTH TLS successful");
             await UpgradeToTlsAsync(cancellationToken);
         }
@@ -592,8 +655,14 @@ public class FtpSessionHandler : IDisposable
     {
         _session.State = SessionState.TlsNegotiation;
 
-        // TODO: Load certificate from configuration
-        var certificate = GetServerCertificate();
+        var certProvider = _serviceProvider.GetRequiredService<ICertificateProvider>();
+        var certificate = certProvider.GetServerCertificate();
+
+        if (certificate is null)
+        {
+            _logger.LogError("TLS upgrade requested but no certificate configured");
+            throw new InvalidOperationException("No TLS certificate configured");
+        }
 
         var sslStream = new SslStream(_clientStream, false);
         await sslStream.AuthenticateAsServerAsync(
@@ -609,13 +678,6 @@ public class FtpSessionHandler : IDisposable
         _session.State = SessionState.Connected;
 
         _logger.LogDebug("TLS upgrade completed for session {SessionId}", _session.Id);
-    }
-
-    private static X509Certificate2 GetServerCertificate()
-    {
-        // TODO: Load from configuration/certificate store
-        // For now, create a self-signed certificate
-        throw new NotImplementedException("Server certificate configuration required");
     }
 
     private async Task SendResponseAsync(int code, string message)

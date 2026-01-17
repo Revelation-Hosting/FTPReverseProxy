@@ -17,9 +17,15 @@ public class CachedRoutingService : IRoutingService
     private readonly IDistributedCache _cache;
     private readonly ILogger<CachedRoutingService> _logger;
 
-    private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(5);
+    // Cache configuration
+    private static readonly TimeSpan CacheAbsoluteExpiration = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan CacheSlidingExpiration = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan NegativeCacheDuration = TimeSpan.FromSeconds(30);
+
     private const string RouteCachePrefix = "route:";
     private const string BackendCachePrefix = "backend:";
+    private const string BackendByNameCachePrefix = "backend_name:";
+    private const string NegativeCacheMarker = "__NULL__";
 
     public CachedRoutingService(
         IRouteMappingRepository routeMappingRepository,
@@ -42,6 +48,13 @@ public class CachedRoutingService : IRoutingService
         var cachedJson = await _cache.GetStringAsync(cacheKey, cancellationToken);
         if (!string.IsNullOrEmpty(cachedJson))
         {
+            // Check for negative cache marker
+            if (cachedJson == NegativeCacheMarker)
+            {
+                _logger.LogDebug("Negative cache hit for route: {Username}", parsedUsername);
+                return null;
+            }
+
             _logger.LogDebug("Cache hit for route: {Username}", parsedUsername);
             return JsonSerializer.Deserialize<RouteMapping>(cachedJson);
         }
@@ -52,11 +65,20 @@ public class CachedRoutingService : IRoutingService
 
         if (route is not null)
         {
-            // Cache the result
+            // Cache positive result with sliding expiration
             var json = JsonSerializer.Serialize(route);
             await _cache.SetStringAsync(cacheKey, json, new DistributedCacheEntryOptions
             {
-                AbsoluteExpirationRelativeToNow = CacheDuration
+                AbsoluteExpirationRelativeToNow = CacheAbsoluteExpiration,
+                SlidingExpiration = CacheSlidingExpiration
+            }, cancellationToken);
+        }
+        else
+        {
+            // Cache negative result for shorter duration to prevent repeated DB queries
+            await _cache.SetStringAsync(cacheKey, NegativeCacheMarker, new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = NegativeCacheDuration
             }, cancellationToken);
         }
 
@@ -71,6 +93,12 @@ public class CachedRoutingService : IRoutingService
         var cachedJson = await _cache.GetStringAsync(cacheKey, cancellationToken);
         if (!string.IsNullOrEmpty(cachedJson))
         {
+            if (cachedJson == NegativeCacheMarker)
+            {
+                _logger.LogDebug("Negative cache hit for backend: {BackendId}", backendId);
+                return null;
+            }
+
             _logger.LogDebug("Cache hit for backend: {BackendId}", backendId);
             return JsonSerializer.Deserialize<BackendServer>(cachedJson);
         }
@@ -81,11 +109,75 @@ public class CachedRoutingService : IRoutingService
 
         if (backend is not null)
         {
-            // Cache the result
+            // Cache positive result
             var json = JsonSerializer.Serialize(backend);
             await _cache.SetStringAsync(cacheKey, json, new DistributedCacheEntryOptions
             {
-                AbsoluteExpirationRelativeToNow = CacheDuration
+                AbsoluteExpirationRelativeToNow = CacheAbsoluteExpiration,
+                SlidingExpiration = CacheSlidingExpiration
+            }, cancellationToken);
+
+            // Also cache by name for fast lookup
+            var nameKey = $"{BackendByNameCachePrefix}{backend.Name}";
+            await _cache.SetStringAsync(nameKey, json, new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = CacheAbsoluteExpiration,
+                SlidingExpiration = CacheSlidingExpiration
+            }, cancellationToken);
+        }
+        else
+        {
+            // Cache negative result
+            await _cache.SetStringAsync(cacheKey, NegativeCacheMarker, new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = NegativeCacheDuration
+            }, cancellationToken);
+        }
+
+        return backend;
+    }
+
+    /// <summary>
+    /// Gets a backend server by name (with caching)
+    /// </summary>
+    public async Task<BackendServer?> GetBackendByNameAsync(string name, CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"{BackendByNameCachePrefix}{name}";
+
+        var cachedJson = await _cache.GetStringAsync(cacheKey, cancellationToken);
+        if (!string.IsNullOrEmpty(cachedJson))
+        {
+            if (cachedJson == NegativeCacheMarker)
+            {
+                return null;
+            }
+            return JsonSerializer.Deserialize<BackendServer>(cachedJson);
+        }
+
+        var backend = await _backendServerRepository.GetByNameAsync(name, cancellationToken);
+
+        if (backend is not null)
+        {
+            var json = JsonSerializer.Serialize(backend);
+            await _cache.SetStringAsync(cacheKey, json, new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = CacheAbsoluteExpiration,
+                SlidingExpiration = CacheSlidingExpiration
+            }, cancellationToken);
+
+            // Also cache by ID
+            var idKey = $"{BackendCachePrefix}{backend.Id}";
+            await _cache.SetStringAsync(idKey, json, new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = CacheAbsoluteExpiration,
+                SlidingExpiration = CacheSlidingExpiration
+            }, cancellationToken);
+        }
+        else
+        {
+            await _cache.SetStringAsync(cacheKey, NegativeCacheMarker, new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = NegativeCacheDuration
             }, cancellationToken);
         }
 
@@ -121,12 +213,51 @@ public class CachedRoutingService : IRoutingService
     }
 
     /// <summary>
-    /// Invalidates the cache for a specific backend server
+    /// Invalidates the cache for a specific backend server by ID
     /// </summary>
     public async Task InvalidateBackendCacheAsync(string backendId, CancellationToken cancellationToken = default)
     {
         var cacheKey = $"{BackendCachePrefix}{backendId}";
         await _cache.RemoveAsync(cacheKey, cancellationToken);
-        _logger.LogDebug("Invalidated backend cache for: {BackendId}", backendId);
+        _logger.LogDebug("Invalidated backend cache for ID: {BackendId}", backendId);
+    }
+
+    /// <summary>
+    /// Invalidates the cache for a backend server by both ID and name
+    /// </summary>
+    public async Task InvalidateBackendCacheAsync(string backendId, string backendName, CancellationToken cancellationToken = default)
+    {
+        var idKey = $"{BackendCachePrefix}{backendId}";
+        var nameKey = $"{BackendByNameCachePrefix}{backendName}";
+
+        await Task.WhenAll(
+            _cache.RemoveAsync(idKey, cancellationToken),
+            _cache.RemoveAsync(nameKey, cancellationToken));
+
+        _logger.LogDebug("Invalidated backend cache for: {BackendId}/{BackendName}", backendId, backendName);
+    }
+
+    /// <summary>
+    /// Invalidates all cache entries for a backend when its name might have changed
+    /// </summary>
+    public async Task InvalidateBackendCacheFullAsync(string backendId, string? oldName, string? newName, CancellationToken cancellationToken = default)
+    {
+        var tasks = new List<Task>
+        {
+            _cache.RemoveAsync($"{BackendCachePrefix}{backendId}", cancellationToken)
+        };
+
+        if (!string.IsNullOrEmpty(oldName))
+        {
+            tasks.Add(_cache.RemoveAsync($"{BackendByNameCachePrefix}{oldName}", cancellationToken));
+        }
+
+        if (!string.IsNullOrEmpty(newName) && newName != oldName)
+        {
+            tasks.Add(_cache.RemoveAsync($"{BackendByNameCachePrefix}{newName}", cancellationToken));
+        }
+
+        await Task.WhenAll(tasks);
+        _logger.LogDebug("Invalidated full backend cache for: {BackendId}", backendId);
     }
 }

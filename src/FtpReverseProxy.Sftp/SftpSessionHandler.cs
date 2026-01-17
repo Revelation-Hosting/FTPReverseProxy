@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using FxSsh.Services;
 using FtpReverseProxy.Core.Interfaces;
 using FtpReverseProxy.Core.Models;
@@ -5,7 +6,6 @@ using FtpReverseProxy.Sftp.Protocol;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Renci.SshNet;
-using System.Buffers.Binary;
 using SshSession = FxSsh.Session;
 
 namespace FtpReverseProxy.Sftp;
@@ -31,6 +31,8 @@ public class SftpSessionHandler : IDisposable
     // Packet buffering for handling fragmented data
     private readonly MemoryStream _packetBuffer = new();
     private int _expectedPacketLength = -1;
+    private bool _connectionAcquired;
+    private readonly IProxyMetrics? _metrics;
 
     public SftpSessionHandler(
         SshSession session,
@@ -40,6 +42,7 @@ public class SftpSessionHandler : IDisposable
         _session = session;
         _serviceProvider = serviceProvider;
         _logger = logger;
+        _metrics = serviceProvider.GetService<IProxyMetrics>();
     }
 
     public void Initialize()
@@ -81,12 +84,15 @@ public class SftpSessionHandler : IDisposable
             _backendServer = result.Server;
             _routeMapping = result.Route;
             args.Result = true;
+            _metrics?.RecordAuthentication(true, "SFTP", _backendServer?.Id);
+            _metrics?.RecordConnectionOpened("SFTP", _backendServer?.Id);
             _logger.LogDebug("SFTP authentication accepted for {Username}, routing to {Backend}",
                 _username, _backendServer?.Name);
         }
         else
         {
             args.Result = false;
+            _metrics?.RecordAuthentication(false, "SFTP", null);
             _logger.LogWarning("SFTP authentication failed for {Username}: no route found", _username);
         }
     }
@@ -186,6 +192,15 @@ public class SftpSessionHandler : IDisposable
 
         try
         {
+            // Try to acquire a connection slot
+            var connectionTracker = _serviceProvider.GetService<IConnectionTracker>();
+            if (connectionTracker is not null &&
+                !connectionTracker.TryAcquireConnection(_backendServer.Id, _backendServer.MaxConnections))
+            {
+                _logger.LogWarning("Connection limit reached for backend {Backend}", _backendServer.Name);
+                return false;
+            }
+            _connectionAcquired = connectionTracker is not null;
             // Parse actual username if format is user@backend
             var parsedUsername = _username;
             var atIndex = _username.LastIndexOf('@');
@@ -244,6 +259,14 @@ public class SftpSessionHandler : IDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to connect to backend SFTP server");
+
+            // Release connection slot on failure
+            if (_connectionAcquired)
+            {
+                var connectionTracker = _serviceProvider.GetService<IConnectionTracker>();
+                connectionTracker?.ReleaseConnection(_backendServer.Id);
+                _connectionAcquired = false;
+            }
             return false;
         }
     }
@@ -352,6 +375,17 @@ public class SftpSessionHandler : IDisposable
 
         _backendClient?.Dispose();
         _backendClient = null;
+
+        // Release connection slot
+        if (_connectionAcquired && _backendServer is not null)
+        {
+            var connectionTracker = _serviceProvider.GetService<IConnectionTracker>();
+            connectionTracker?.ReleaseConnection(_backendServer.Id);
+            _connectionAcquired = false;
+        }
+
+        // Record connection closed
+        _metrics?.RecordConnectionClosed("SFTP", _backendServer?.Id);
 
         _packetBuffer.Dispose();
     }

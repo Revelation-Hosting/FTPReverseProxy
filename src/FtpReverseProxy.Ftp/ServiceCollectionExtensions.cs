@@ -1,3 +1,4 @@
+using System.Security.Cryptography.X509Certificates;
 using FtpReverseProxy.Core.Interfaces;
 using FtpReverseProxy.Ftp.DataChannel;
 using FtpReverseProxy.Ftp.Handlers;
@@ -61,24 +62,25 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ISessionManager, SessionManager>();
         services.AddTransient<IBackendConnection, FtpBackendConnection>();
 
+        // Register certificate provider as singleton
+        services.AddSingleton<ICertificateProvider>(sp =>
+        {
+            var logger = sp.GetRequiredService<ILogger<CertificateProvider>>();
+            return new CertificateProvider(logger, options.CertificatePath, options.CertificatePassword);
+        });
+
         // Register data channel manager as singleton
         services.AddSingleton<IDataChannelManager>(sp =>
         {
             var logger = sp.GetRequiredService<ILogger<DataChannelManager>>();
-
-            System.Security.Cryptography.X509Certificates.X509Certificate2? certificate = null;
-            if (!string.IsNullOrEmpty(options.CertificatePath))
-            {
-                certificate = System.Security.Cryptography.X509Certificates.X509CertificateLoader
-                    .LoadPkcs12FromFile(options.CertificatePath, options.CertificatePassword);
-            }
+            var certProvider = sp.GetRequiredService<ICertificateProvider>();
 
             return new DataChannelManager(
                 logger,
                 options.MinPort,
                 options.MaxPort,
                 options.ExternalAddress,
-                certificate);
+                certProvider.GetServerCertificate());
         });
 
         return services;
