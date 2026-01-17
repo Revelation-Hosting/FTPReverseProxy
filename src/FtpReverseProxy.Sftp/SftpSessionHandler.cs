@@ -1,34 +1,37 @@
 using FxSsh.Services;
 using FtpReverseProxy.Core.Interfaces;
 using FtpReverseProxy.Core.Models;
+using FtpReverseProxy.Sftp.Protocol;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Renci.SshNet;
+using System.Buffers.Binary;
 using SshSession = FxSsh.Session;
 
 namespace FtpReverseProxy.Sftp;
 
 /// <summary>
 /// Handles an individual SFTP session and proxies to a backend server.
-///
-/// Note: This is a foundational implementation. Full SFTP proxying requires:
-/// 1. Parsing SFTP binary packets from the client
-/// 2. Executing corresponding operations on the backend using SSH.NET
-/// 3. Serializing responses back to the client
-///
-/// Currently, this handles authentication and connection setup.
-/// The actual SFTP packet proxying is marked as TODO.
+/// Parses SFTP binary packets and translates operations to the backend.
 /// </summary>
-public class SftpSessionHandler
+public class SftpSessionHandler : IDisposable
 {
     private readonly SshSession _session;
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger _logger;
 
     private string? _username;
+#pragma warning disable CS0649 // Field is never assigned - password auth requires FxSsh.PwAuth
     private string? _password;
+#pragma warning restore CS0649
     private BackendServer? _backendServer;
     private SftpClient? _backendClient;
+    private SftpProxy? _sftpProxy;
+    private SessionChannel? _clientChannel;
+
+    // Packet buffering for handling fragmented data
+    private readonly MemoryStream _packetBuffer = new();
+    private int _expectedPacketLength = -1;
 
     public SftpSessionHandler(
         SshSession session,
@@ -132,28 +135,35 @@ public class SftpSessionHandler
 
     private void OnCommandOpened(object? sender, CommandRequestedArgs args)
     {
-        _logger.LogDebug("SFTP command requested: {ShellType}", args.ShellType);
+        _logger.LogDebug("SSH command requested: {ShellType}", args.ShellType);
 
         // Check if this is an SFTP subsystem request
-        // ShellType can be "shell", "exec", or "subsystem"
-        // For SFTP, ShellType should be "subsystem" with CommandText being "sftp"
         if (args.ShellType == "subsystem" && args.CommandText == "sftp")
         {
-            // SFTP subsystem requested
             _logger.LogInformation("SFTP subsystem requested by {Username}", _username);
 
-            // Set up the SFTP proxy
+            _clientChannel = args.Channel;
+
+            // Set up event handlers
             args.Channel.DataReceived += OnClientDataReceived;
             args.Channel.CloseReceived += OnClientChannelClosed;
 
-            // Connect to backend
+            // Connect to backend and create proxy
             if (!ConnectToBackend())
             {
                 _logger.LogError("Failed to connect to backend SFTP server");
+                args.Channel.SendClose();
                 return;
             }
 
-            _logger.LogInformation("SFTP proxy session established for {Username}", _username);
+            // Create the SFTP proxy
+            _sftpProxy = new SftpProxy(
+                _backendClient!,
+                SendDataToClient,
+                _logger);
+
+            _logger.LogInformation("SFTP proxy session established for {Username} -> {Backend}",
+                _username, _backendServer?.Name);
         }
     }
 
@@ -171,12 +181,20 @@ public class SftpSessionHandler
             // For now, use a placeholder that can be extended
             var password = _password ?? string.Empty;
 
+            // Parse actual username if format is user@backend
+            var actualUsername = _username;
+            var atIndex = _username.LastIndexOf('@');
+            if (atIndex > 0)
+            {
+                actualUsername = _username[..atIndex];
+            }
+
             // Create SFTP connection to backend
             var connectionInfo = new ConnectionInfo(
                 _backendServer.Host,
                 _backendServer.Port,
-                _username,
-                new PasswordAuthenticationMethod(_username, password))
+                actualUsername,
+                new PasswordAuthenticationMethod(actualUsername, password))
             {
                 Timeout = TimeSpan.FromMilliseconds(_backendServer.ConnectionTimeoutMs)
             };
@@ -196,25 +214,81 @@ public class SftpSessionHandler
 
     private void OnClientDataReceived(object? sender, byte[] data)
     {
-        // This is where SFTP packet proxying happens
-        //
-        // The SFTP protocol is binary. Each packet has:
-        // - 4-byte length
-        // - 1-byte type (SSH_FXP_INIT, SSH_FXP_OPEN, SSH_FXP_READ, etc.)
-        // - 4-byte request-id
-        // - Payload (type-specific)
-        //
-        // To proxy properly, we need to:
-        // 1. Parse the packet type and contents
-        // 2. Call corresponding SSH.NET SftpClient methods
-        // 3. Serialize the response and send back to client
-        //
-        // This is non-trivial and marked for future implementation.
+        _logger.LogTrace("Received {Length} bytes from client", data.Length);
 
-        _logger.LogTrace("SFTP data received from client: {Length} bytes", data.Length);
+        try
+        {
+            // Buffer the incoming data
+            _packetBuffer.Write(data);
 
-        // TODO: Implement SFTP packet parsing and proxying
-        // For now, log that we received data
+            // Process complete packets
+            ProcessBufferedPackets();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing client data");
+        }
+    }
+
+    private void ProcessBufferedPackets()
+    {
+        while (true)
+        {
+            var buffer = _packetBuffer.ToArray();
+
+            // Need at least 4 bytes for length prefix
+            if (buffer.Length < 4)
+                break;
+
+            // Read packet length
+            if (_expectedPacketLength < 0)
+            {
+                _expectedPacketLength = (int)BinaryPrimitives.ReadUInt32BigEndian(buffer.AsSpan(0, 4));
+            }
+
+            // Total packet size = 4-byte length + packet data
+            var totalPacketSize = 4 + _expectedPacketLength;
+
+            // Check if we have the complete packet
+            if (buffer.Length < totalPacketSize)
+                break;
+
+            // Extract the complete packet
+            var packet = buffer[..totalPacketSize];
+
+            // Remove processed data from buffer
+            var remaining = buffer[totalPacketSize..];
+            _packetBuffer.SetLength(0);
+            if (remaining.Length > 0)
+            {
+                _packetBuffer.Write(remaining);
+            }
+
+            // Reset expected length for next packet
+            _expectedPacketLength = -1;
+
+            // Process the packet
+            if (_sftpProxy is not null)
+            {
+                _sftpProxy.ProcessPacket(packet);
+            }
+            else
+            {
+                _logger.LogWarning("Received SFTP data but proxy not initialized");
+            }
+        }
+    }
+
+    private void SendDataToClient(byte[] data)
+    {
+        try
+        {
+            _clientChannel?.SendData(data);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending data to client");
+        }
     }
 
     private void OnClientChannelClosed(object? sender, EventArgs args)
@@ -225,6 +299,9 @@ public class SftpSessionHandler
 
     private void Cleanup()
     {
+        _sftpProxy?.Dispose();
+        _sftpProxy = null;
+
         if (_backendClient?.IsConnected == true)
         {
             try
@@ -239,5 +316,12 @@ public class SftpSessionHandler
 
         _backendClient?.Dispose();
         _backendClient = null;
+
+        _packetBuffer.Dispose();
+    }
+
+    public void Dispose()
+    {
+        Cleanup();
     }
 }
