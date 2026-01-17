@@ -90,6 +90,15 @@ public class FtpListener : IProxyListener
     private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
     {
         var endpoint = client.Client.RemoteEndPoint as IPEndPoint;
+
+        // Reject new connections during shutdown
+        if (_sessionManager.IsShuttingDown)
+        {
+            _logger.LogDebug("Rejecting connection from {RemoteEndpoint} - server is shutting down", endpoint);
+            client.Dispose();
+            return;
+        }
+
         _logger.LogInformation("New connection from {RemoteEndpoint}", endpoint);
 
         try

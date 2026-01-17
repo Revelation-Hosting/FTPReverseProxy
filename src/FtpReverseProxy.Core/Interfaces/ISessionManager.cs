@@ -43,4 +43,17 @@ public interface ISessionManager
     /// <param name="backendId">The backend server ID</param>
     /// <returns>Number of active sessions to that backend</returns>
     int GetSessionCountForBackend(string backendId);
+
+    /// <summary>
+    /// Waits for all active sessions to complete or until timeout
+    /// </summary>
+    /// <param name="timeout">Maximum time to wait</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>True if all sessions completed, false if timeout occurred</returns>
+    Task<bool> WaitForDrainAsync(TimeSpan timeout, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Signals that the system is shutting down (new connections may be rejected)
+    /// </summary>
+    bool IsShuttingDown { get; set; }
 }

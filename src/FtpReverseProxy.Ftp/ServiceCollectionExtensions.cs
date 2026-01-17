@@ -62,6 +62,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ISessionManager, SessionManager>();
         services.AddTransient<IBackendConnection, FtpBackendConnection>();
 
+        // Register backend certificate validator as singleton
+        services.AddSingleton<IBackendCertificateValidator, BackendCertificateValidator>();
+
         // Register certificate provider as singleton
         services.AddSingleton<ICertificateProvider>(sp =>
         {
@@ -74,9 +77,11 @@ public static class ServiceCollectionExtensions
         {
             var logger = sp.GetRequiredService<ILogger<DataChannelManager>>();
             var certProvider = sp.GetRequiredService<ICertificateProvider>();
+            var certValidator = sp.GetRequiredService<IBackendCertificateValidator>();
 
             return new DataChannelManager(
                 logger,
+                certValidator,
                 options.MinPort,
                 options.MaxPort,
                 options.ExternalAddress,

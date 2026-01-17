@@ -39,6 +39,32 @@ public class ProxyConfiguration
     /// Redis cache configuration
     /// </summary>
     public RedisConfiguration? Redis { get; set; }
+
+    /// <summary>
+    /// Backend TLS/SSL configuration
+    /// </summary>
+    public BackendTlsConfiguration BackendTls { get; set; } = new();
+
+    /// <summary>
+    /// Graceful shutdown configuration
+    /// </summary>
+    public ShutdownConfiguration Shutdown { get; set; } = new();
+}
+
+/// <summary>
+/// Configuration for graceful shutdown behavior
+/// </summary>
+public class ShutdownConfiguration
+{
+    /// <summary>
+    /// Maximum time to wait for active sessions to complete during shutdown (seconds)
+    /// </summary>
+    public int DrainTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Whether to reject new connections during the drain period
+    /// </summary>
+    public bool RejectNewConnections { get; set; } = true;
 }
 
 /// <summary>
@@ -167,4 +193,61 @@ public class RedisConfiguration
     /// Cache TTL in seconds for route lookups
     /// </summary>
     public int CacheTtlSeconds { get; set; } = 300;
+}
+
+/// <summary>
+/// Backend TLS/SSL certificate validation configuration
+/// </summary>
+public class BackendTlsConfiguration
+{
+    /// <summary>
+    /// Certificate validation mode for backend connections
+    /// </summary>
+    public CertificateValidationMode ValidationMode { get; set; } = CertificateValidationMode.SystemDefault;
+
+    /// <summary>
+    /// Allow expired certificates (not recommended for production)
+    /// </summary>
+    public bool AllowExpired { get; set; } = false;
+
+    /// <summary>
+    /// Allow certificates with name mismatch (not recommended for production)
+    /// </summary>
+    public bool AllowNameMismatch { get; set; } = false;
+
+    /// <summary>
+    /// Path to trusted CA certificates file or directory (PEM format)
+    /// </summary>
+    public string? TrustedCertificatesPath { get; set; }
+
+    /// <summary>
+    /// Specific certificate thumbprints to trust (SHA256, hex-encoded)
+    /// </summary>
+    public List<string> TrustedThumbprints { get; set; } = new();
+}
+
+/// <summary>
+/// Certificate validation modes for backend connections
+/// </summary>
+public enum CertificateValidationMode
+{
+    /// <summary>
+    /// Use system default validation (recommended for production)
+    /// </summary>
+    SystemDefault,
+
+    /// <summary>
+    /// Accept any certificate including self-signed (development only)
+    /// </summary>
+    AcceptAll,
+
+    /// <summary>
+    /// Only accept certificates matching trusted thumbprints
+    /// </summary>
+    TrustedThumbprintsOnly,
+
+    /// <summary>
+    /// Custom validation with configurable options
+    /// </summary>
+    Custom
 }

@@ -12,6 +12,7 @@ public class Worker : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly ProxyConfiguration _config;
     private readonly List<IProxyListener> _listeners = new();
+    private ISessionManager? _sessionManager;
 
     public Worker(
         ILogger<Worker> logger,
@@ -40,13 +41,50 @@ public class Worker : BackgroundService
         }
         finally
         {
-            await StopListenersAsync();
+            await GracefulShutdownAsync();
+        }
+    }
+
+    private async Task GracefulShutdownAsync()
+    {
+        // Signal that we're shutting down (reject new connections)
+        if (_sessionManager is not null && _config.Shutdown.RejectNewConnections)
+        {
+            _sessionManager.IsShuttingDown = true;
+            _logger.LogInformation("Rejecting new connections during shutdown");
+        }
+
+        // Stop accepting new connections
+        await StopListenersAsync();
+
+        // Wait for existing sessions to drain
+        if (_sessionManager is not null && _sessionManager.ActiveSessionCount > 0)
+        {
+            var drainTimeout = TimeSpan.FromSeconds(_config.Shutdown.DrainTimeoutSeconds);
+            _logger.LogInformation(
+                "Waiting up to {Timeout}s for {Count} active session(s) to complete...",
+                _config.Shutdown.DrainTimeoutSeconds,
+                _sessionManager.ActiveSessionCount);
+
+            var drained = await _sessionManager.WaitForDrainAsync(drainTimeout);
+
+            if (drained)
+            {
+                _logger.LogInformation("All sessions completed gracefully");
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Shutdown timeout reached with {Count} session(s) still active",
+                    _sessionManager.ActiveSessionCount);
+            }
         }
     }
 
     private async Task StartListenersAsync(CancellationToken stoppingToken)
     {
-        var sessionManager = _serviceProvider.GetRequiredService<ISessionManager>();
+        _sessionManager = _serviceProvider.GetRequiredService<ISessionManager>();
+        var sessionManager = _sessionManager;
 
         // Start FTP listener
         if (_config.Ftp.Enabled)

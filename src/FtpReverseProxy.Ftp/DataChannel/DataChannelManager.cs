@@ -6,6 +6,7 @@ using System.Security.Cryptography.X509Certificates;
 using FtpReverseProxy.Core.Enums;
 using FtpReverseProxy.Core.Interfaces;
 using Microsoft.Extensions.Logging;
+using RemoteCertificateValidationCallback = System.Net.Security.RemoteCertificateValidationCallback;
 
 namespace FtpReverseProxy.Ftp.DataChannel;
 
@@ -22,12 +23,14 @@ public class DataChannelManager : IDataChannelManager
     private readonly int _maxPort;
     private readonly string? _externalAddress;
     private readonly X509Certificate2? _certificate;
+    private readonly RemoteCertificateValidationCallback _certificateValidationCallback;
 
     private int _nextPort;
     private readonly object _portLock = new();
 
     public DataChannelManager(
         ILogger<DataChannelManager> logger,
+        IBackendCertificateValidator certificateValidator,
         int minPort = 50000,
         int maxPort = 51000,
         string? externalAddress = null,
@@ -39,6 +42,7 @@ public class DataChannelManager : IDataChannelManager
         _nextPort = minPort;
         _externalAddress = externalAddress;
         _certificate = certificate;
+        _certificateValidationCallback = certificateValidator.ValidationCallback;
     }
 
     public async Task<IPEndPoint> SetupPassiveRelayAsync(
@@ -314,7 +318,7 @@ public class DataChannelManager : IDataChannelManager
                     checkCertificateRevocation: false);
                 clientStream = clientSslStream;
 
-                var backendSslStream = new SslStream(backendStream, false, ValidateServerCertificate);
+                var backendSslStream = new SslStream(backendStream, false, _certificateValidationCallback);
                 await backendSslStream.AuthenticateAsClientAsync(
                     state.BackendDataEndpoint?.Address.ToString() ?? "localhost");
                 backendStream = backendSslStream;
@@ -386,15 +390,5 @@ public class DataChannelManager : IDataChannelManager
         {
             // Cancelled - expected
         }
-    }
-
-    private static bool ValidateServerCertificate(
-        object sender,
-        X509Certificate? certificate,
-        X509Chain? chain,
-        SslPolicyErrors sslPolicyErrors)
-    {
-        // TODO: Make configurable
-        return true;
     }
 }

@@ -16,6 +16,7 @@ namespace FtpReverseProxy.Ftp.Handlers;
 public class FtpBackendConnection : IBackendConnection
 {
     private readonly ILogger<FtpBackendConnection> _logger;
+    private readonly IBackendCertificateValidator _certificateValidator;
 
     private TcpClient? _client;
     private Stream? _stream;
@@ -23,9 +24,12 @@ public class FtpBackendConnection : IBackendConnection
     private StreamWriter? _writer;
     private BackendServer? _server;
 
-    public FtpBackendConnection(ILogger<FtpBackendConnection> logger)
+    public FtpBackendConnection(
+        ILogger<FtpBackendConnection> logger,
+        IBackendCertificateValidator certificateValidator)
     {
         _logger = logger;
+        _certificateValidator = certificateValidator;
     }
 
     public bool IsConnected => _client?.Connected ?? false;
@@ -133,7 +137,7 @@ public class FtpBackendConnection : IBackendConnection
             }
         }
 
-        var sslStream = new SslStream(_stream, false, ValidateServerCertificate);
+        var sslStream = new SslStream(_stream, false, _certificateValidator.ValidationCallback);
         await sslStream.AuthenticateAsClientAsync(_server.Host);
 
         _stream = sslStream;
@@ -205,16 +209,6 @@ public class FtpBackendConnection : IBackendConnection
         }
 
         return FtpResponseParser.Parse(lines);
-    }
-
-    private static bool ValidateServerCertificate(
-        object sender,
-        X509Certificate? certificate,
-        X509Chain? chain,
-        SslPolicyErrors sslPolicyErrors)
-    {
-        // TODO: Make this configurable - for now accept all certificates
-        return true;
     }
 
     public async ValueTask DisposeAsync()
