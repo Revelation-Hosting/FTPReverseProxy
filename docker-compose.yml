@@ -3,6 +3,32 @@
 # For separate IP configuration, see docker-compose.macvlan.yml
 
 services:
+  # Management API - also handles database migrations
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: ftp-proxy-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - DOTNET_ENVIRONMENT=Production
+      - AutoMigrate=true
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=ftpproxy;Username=ftpproxy;Password=ftpproxy
+      - DatabaseProvider=PostgreSQL
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ftp-proxy-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
   ftp-proxy:
     build:
       context: .
@@ -70,6 +96,11 @@ services:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - ftp-proxy-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ftpproxy -d ftpproxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     # Uncomment to expose PostgreSQL for external access
     # ports:
     #   - "5432:5432"

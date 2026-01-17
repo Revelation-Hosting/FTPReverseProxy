@@ -1,0 +1,41 @@
+# Build stage
+FROM mcr.microsoft.com/dotnet/sdk:10.0-preview AS build
+WORKDIR /src
+
+# Copy solution and project files
+COPY FtpReverseProxy.sln .
+COPY src/FtpReverseProxy.Core/*.csproj src/FtpReverseProxy.Core/
+COPY src/FtpReverseProxy.Data/*.csproj src/FtpReverseProxy.Data/
+COPY src/FtpReverseProxy.Api/*.csproj src/FtpReverseProxy.Api/
+
+# Restore dependencies
+RUN dotnet restore src/FtpReverseProxy.Api/FtpReverseProxy.Api.csproj
+
+# Copy source code
+COPY src/ src/
+
+# Build and publish
+RUN dotnet publish src/FtpReverseProxy.Api/FtpReverseProxy.Api.csproj \
+    -c Release \
+    -o /app/publish \
+    --no-restore
+
+# Runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview AS runtime
+WORKDIR /app
+
+# Install curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy published application
+COPY --from=build /app/publish .
+
+# Expose API port
+EXPOSE 8080
+
+# Set environment variables
+ENV DOTNET_ENVIRONMENT=Production
+ENV ASPNETCORE_URLS=http://+:8080
+
+ENTRYPOINT ["dotnet", "FtpReverseProxy.Api.dll"]

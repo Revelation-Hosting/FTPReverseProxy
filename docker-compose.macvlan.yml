@@ -12,6 +12,26 @@
 # and may require promiscuous mode on the network interface.
 
 services:
+  # Management API - also handles database migrations
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: ftp-proxy-api
+    restart: unless-stopped
+    environment:
+      - DOTNET_ENVIRONMENT=Production
+      - AutoMigrate=true
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=ftpproxy;Username=ftpproxy;Password=ftpproxy
+      - DatabaseProvider=PostgreSQL
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      ftp-proxy-macvlan:
+        ipv4_address: 192.168.1.101
+      ftp-proxy-internal:
+
   ftp-proxy:
     build:
       context: .
@@ -78,6 +98,11 @@ services:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - ftp-proxy-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ftpproxy -d ftpproxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -110,8 +135,8 @@ networks:
         - subnet: 192.168.1.0/24
           # Your network's gateway
           gateway: 192.168.1.1
-          # IP range for containers (can be a single IP)
-          ip_range: 192.168.1.100/32
+          # IP range for containers (API at .101, FTP proxy at .100)
+          ip_range: 192.168.1.100/30
 
 # ALTERNATIVE: Using ipvlan instead of macvlan (works better in some environments)
 # Replace the ftp-proxy-macvlan network with:
