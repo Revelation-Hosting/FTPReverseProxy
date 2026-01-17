@@ -170,7 +170,7 @@ public class FtpBackendConnection : IBackendConnection
         _stream = null;
     }
 
-    private async Task<FtpResponse> ReadResponseAsync(CancellationToken cancellationToken)
+    public async Task<FtpResponse> ReadResponseAsync(CancellationToken cancellationToken = default)
     {
         var lines = new List<string>();
         var firstLine = await _reader!.ReadLineAsync(cancellationToken);

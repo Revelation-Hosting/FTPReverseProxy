@@ -31,6 +31,14 @@ public interface IBackendConnection : IAsyncDisposable
     Task<FtpResponse> SendCommandAsync(FtpCommand command, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Reads a response from the backend server without sending a command
+    /// Used for reading completion responses after data transfers
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>The response from the backend</returns>
+    Task<FtpResponse> ReadResponseAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Upgrades the connection to TLS (for explicit FTPS)
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>

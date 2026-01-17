@@ -6,6 +6,7 @@ using System.Text;
 using FtpReverseProxy.Core.Enums;
 using FtpReverseProxy.Core.Interfaces;
 using FtpReverseProxy.Core.Models;
+using FtpReverseProxy.Ftp.DataChannel;
 using FtpReverseProxy.Ftp.Parsing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -30,6 +31,19 @@ public class FtpSessionHandler : IDisposable
 
     private string? _pendingUsername;
     private IBackendConnection? _backendConnection;
+    private IDataChannelManager? _dataChannelManager;
+
+    // Commands that trigger data transfer
+    private static readonly HashSet<string> DataTransferCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        FtpCommandParser.Commands.List,
+        FtpCommandParser.Commands.Nlst,
+        FtpCommandParser.Commands.Mlsd,
+        FtpCommandParser.Commands.Retr,
+        FtpCommandParser.Commands.Stor,
+        FtpCommandParser.Commands.Stou,
+        FtpCommandParser.Commands.Appe
+    };
 
     public FtpSessionHandler(
         TcpClient client,
@@ -56,6 +70,9 @@ public class FtpSessionHandler : IDisposable
         };
         _sessionManager.RegisterSession(_session);
 
+        // Get data channel manager
+        _dataChannelManager = _serviceProvider.GetRequiredService<IDataChannelManager>();
+
         try
         {
             // Get network stream
@@ -78,6 +95,7 @@ public class FtpSessionHandler : IDisposable
         }
         finally
         {
+            _dataChannelManager.CancelDataChannel(_session.Id);
             _sessionManager.RemoveSession(_session.Id);
             _session.State = SessionState.Closed;
         }
@@ -160,6 +178,16 @@ public class FtpSessionHandler : IDisposable
 
             case FtpCommandParser.Commands.Noop:
                 await SendResponseAsync(FtpResponseParser.Codes.CommandOk, "OK");
+                break;
+
+            case FtpCommandParser.Commands.Pasv:
+            case FtpCommandParser.Commands.Epsv:
+                await HandlePassiveModeAsync(command, cancellationToken);
+                break;
+
+            case FtpCommandParser.Commands.Port:
+            case FtpCommandParser.Commands.Eprt:
+                await HandleActiveModeAsync(command, cancellationToken);
                 break;
 
             default:
@@ -335,11 +363,147 @@ public class FtpSessionHandler : IDisposable
         features.AppendLine(" UTF8");
         features.AppendLine(" PASV");
         features.AppendLine(" EPSV");
+        features.AppendLine(" PORT");
+        features.AppendLine(" EPRT");
         features.AppendLine(" SIZE");
         features.AppendLine(" MDTM");
+        features.AppendLine(" REST STREAM");
         features.Append("211 End");
 
         await _writer.WriteLineAsync(features.ToString());
+    }
+
+    private async Task HandlePassiveModeAsync(FtpCommand command, CancellationToken cancellationToken)
+    {
+        if (_session.State != SessionState.Active || _backendConnection is null)
+        {
+            await SendResponseAsync(FtpResponseParser.Codes.NotLoggedIn, "Please login first");
+            return;
+        }
+
+        // Forward PASV/EPSV to backend
+        var response = await _backendConnection.SendCommandAsync(command, cancellationToken);
+
+        if (response.Code != FtpResponseParser.Codes.EnteringPassiveMode &&
+            response.Code != FtpResponseParser.Codes.EnteringExtendedPassiveMode)
+        {
+            // Backend rejected the command, forward the error
+            await _writer.WriteLineAsync(response.RawResponse);
+            return;
+        }
+
+        // Parse backend's data endpoint
+        IPEndPoint? backendEndpoint;
+        if (command.Verb == FtpCommandParser.Commands.Pasv)
+        {
+            backendEndpoint = DataChannelHelpers.ParsePasvResponse(response.RawResponse);
+        }
+        else
+        {
+            // For EPSV, we use the backend's control connection IP
+            var port = DataChannelHelpers.ParseEpsvResponse(response.RawResponse);
+            if (port == 0 || _session.Backend is null)
+            {
+                await SendResponseAsync(FtpResponseParser.Codes.CantOpenDataConnection,
+                    "Failed to parse backend response");
+                return;
+            }
+            var backendIp = IPAddress.Parse(_session.Backend.Host);
+            backendEndpoint = new IPEndPoint(backendIp, port);
+        }
+
+        if (backendEndpoint is null)
+        {
+            await SendResponseAsync(FtpResponseParser.Codes.CantOpenDataConnection,
+                "Failed to parse backend response");
+            return;
+        }
+
+        _logger.LogDebug("Backend passive mode endpoint: {Endpoint}", backendEndpoint);
+
+        // Set up data channel relay
+        var useTls = _session.DataChannelProtected && _session.ClientTlsEnabled;
+        var proxyEndpoint = await _dataChannelManager!.SetupPassiveRelayAsync(
+            _session.Id,
+            backendEndpoint,
+            useTls,
+            cancellationToken);
+
+        _session.DataChannelMode = DataChannelMode.Passive;
+
+        _logger.LogDebug("Proxy passive mode endpoint: {Endpoint}", proxyEndpoint);
+
+        // Send rewritten response to client with proxy's endpoint
+        string clientResponse;
+        if (command.Verb == FtpCommandParser.Commands.Pasv)
+        {
+            clientResponse = DataChannelHelpers.FormatPasvResponse(proxyEndpoint);
+        }
+        else
+        {
+            clientResponse = DataChannelHelpers.FormatEpsvResponse(proxyEndpoint.Port);
+        }
+
+        await _writer.WriteLineAsync(clientResponse);
+    }
+
+    private async Task HandleActiveModeAsync(FtpCommand command, CancellationToken cancellationToken)
+    {
+        if (_session.State != SessionState.Active || _backendConnection is null)
+        {
+            await SendResponseAsync(FtpResponseParser.Codes.NotLoggedIn, "Please login first");
+            return;
+        }
+
+        // Parse client's data endpoint from command
+        IPEndPoint? clientEndpoint;
+        if (command.Verb == FtpCommandParser.Commands.Port)
+        {
+            clientEndpoint = DataChannelHelpers.ParsePortCommand(command.Argument ?? string.Empty);
+        }
+        else
+        {
+            clientEndpoint = DataChannelHelpers.ParseEprtCommand(command.Argument ?? string.Empty);
+        }
+
+        if (clientEndpoint is null)
+        {
+            await SendResponseAsync(FtpResponseParser.Codes.SyntaxErrorInArguments,
+                "Invalid address format");
+            return;
+        }
+
+        _logger.LogDebug("Client active mode endpoint: {Endpoint}", clientEndpoint);
+
+        // Set up data channel relay
+        var useTls = _session.DataChannelProtected && _session.ClientTlsEnabled;
+        var proxyEndpoint = await _dataChannelManager!.SetupActiveRelayAsync(
+            _session.Id,
+            clientEndpoint,
+            useTls,
+            cancellationToken);
+
+        _session.DataChannelMode = DataChannelMode.Active;
+
+        _logger.LogDebug("Proxy active mode endpoint for backend: {Endpoint}", proxyEndpoint);
+
+        // Send rewritten PORT/EPRT to backend with proxy's endpoint
+        string backendCommand;
+        if (command.Verb == FtpCommandParser.Commands.Port)
+        {
+            backendCommand = DataChannelHelpers.FormatPortCommand(proxyEndpoint);
+        }
+        else
+        {
+            backendCommand = DataChannelHelpers.FormatEprtCommand(proxyEndpoint);
+        }
+
+        var backendResponse = await _backendConnection.SendCommandAsync(
+            new FtpCommand { Verb = command.Verb, Argument = backendCommand.Split(' ', 2)[1], RawCommand = backendCommand },
+            cancellationToken);
+
+        // Forward response to client
+        await _writer.WriteLineAsync(backendResponse.RawResponse);
     }
 
     private async Task HandleProxiedCommandAsync(FtpCommand command, CancellationToken cancellationToken)
@@ -350,16 +514,10 @@ public class FtpSessionHandler : IDisposable
             return;
         }
 
-        // Special handling for data channel commands
-        if (command.Verb is FtpCommandParser.Commands.Pasv or FtpCommandParser.Commands.Epsv)
+        // Check if this is a data transfer command
+        if (DataTransferCommands.Contains(command.Verb))
         {
-            await HandlePassiveModeAsync(command, cancellationToken);
-            return;
-        }
-
-        if (command.Verb is FtpCommandParser.Commands.Port or FtpCommandParser.Commands.Eprt)
-        {
-            await HandleActiveModeAsync(command, cancellationToken);
+            await HandleDataTransferCommandAsync(command, cancellationToken);
             return;
         }
 
@@ -368,28 +526,66 @@ public class FtpSessionHandler : IDisposable
         await _writer.WriteLineAsync(response.RawResponse);
     }
 
-    private async Task HandlePassiveModeAsync(FtpCommand command, CancellationToken cancellationToken)
+    private async Task HandleDataTransferCommandAsync(FtpCommand command, CancellationToken cancellationToken)
     {
-        // TODO: Implement data channel relay for passive mode
-        // For now, forward to backend and rewrite response
-        var response = await _backendConnection!.SendCommandAsync(command, cancellationToken);
-
-        if (response.Code == FtpResponseParser.Codes.EnteringPassiveMode ||
-            response.Code == FtpResponseParser.Codes.EnteringExtendedPassiveMode)
+        // Verify we have a data channel set up
+        var dataChannelMode = _dataChannelManager!.GetDataChannelMode(_session.Id);
+        if (dataChannelMode is null)
         {
-            // TODO: Set up data channel relay and rewrite response with proxy's address
-            _session.DataChannelMode = DataChannelMode.Passive;
+            await SendResponseAsync(FtpResponseParser.Codes.CantOpenDataConnection,
+                "Use PASV or PORT first");
+            return;
         }
 
+        _logger.LogDebug("Starting data transfer for {Command} in {Mode} mode",
+            command.Verb, dataChannelMode);
+
+        // Send command to backend
+        var response = await _backendConnection!.SendCommandAsync(command, cancellationToken);
+
+        // Send preliminary response to client (150 or error)
         await _writer.WriteLineAsync(response.RawResponse);
+
+        if (!response.IsPreliminary)
+        {
+            // Command rejected, no data transfer
+            _dataChannelManager.CancelDataChannel(_session.Id);
+            return;
+        }
+
+        try
+        {
+            // Wait for data transfer to complete
+            var (uploaded, downloaded) = await _dataChannelManager.RelayDataAsync(_session.Id, cancellationToken);
+
+            _session.BytesUploaded += uploaded;
+            _session.BytesDownloaded += downloaded;
+
+            _logger.LogDebug("Data transfer completed: {Uploaded} bytes up, {Downloaded} bytes down",
+                uploaded, downloaded);
+
+            // Read the completion response from backend (226)
+            var completionResponse = await ReadBackendResponseAsync(cancellationToken);
+            await _writer.WriteLineAsync(completionResponse.RawResponse);
+        }
+        catch (OperationCanceledException)
+        {
+            await SendResponseAsync(FtpResponseParser.Codes.ConnectionClosed, "Transfer aborted");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during data transfer");
+            await SendResponseAsync(FtpResponseParser.Codes.ActionAborted, "Transfer failed");
+        }
     }
 
-    private async Task HandleActiveModeAsync(FtpCommand command, CancellationToken cancellationToken)
+    private async Task<FtpResponse> ReadBackendResponseAsync(CancellationToken cancellationToken)
     {
-        // TODO: Implement data channel relay for active mode
-        _session.DataChannelMode = DataChannelMode.Active;
-        var response = await _backendConnection!.SendCommandAsync(command, cancellationToken);
-        await _writer.WriteLineAsync(response.RawResponse);
+        // This is a simplified version - ideally IBackendConnection should expose this
+        // For now, we'll send a NOOP to get a response
+        return await _backendConnection!.SendCommandAsync(
+            new FtpCommand { Verb = "", Argument = null, RawCommand = "" },
+            cancellationToken);
     }
 
     private async Task UpgradeToTlsAsync(CancellationToken cancellationToken)
@@ -429,6 +625,7 @@ public class FtpSessionHandler : IDisposable
 
     public void Dispose()
     {
+        _dataChannelManager?.CancelDataChannel(_session.Id);
         _backendConnection?.DisposeAsync().AsTask().Wait();
         _reader?.Dispose();
         _writer?.Dispose();
