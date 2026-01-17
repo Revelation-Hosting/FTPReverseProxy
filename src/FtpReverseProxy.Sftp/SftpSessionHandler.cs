@@ -21,9 +21,7 @@ public class SftpSessionHandler : IDisposable
     private readonly ILogger _logger;
 
     private string? _username;
-#pragma warning disable CS0649 // Field is never assigned - password auth requires FxSsh.PwAuth
     private string? _password;
-#pragma warning restore CS0649
     private BackendServer? _backendServer;
     private SftpClient? _backendClient;
     private SftpProxy? _sftpProxy;
@@ -63,11 +61,16 @@ public class SftpSessionHandler : IDisposable
 
     private void OnUserAuth(object? sender, UserauthArgs args)
     {
-        // Extract username for routing
+        // Extract username and password for routing and backend auth
         _username = args.Username;
 
-        _logger.LogDebug("SFTP auth attempt for user: {Username}, algorithm: {Algorithm}",
-            _username, args.KeyAlgorithm);
+        // FxSsh.PwAuth provides Password property for password authentication
+        // Check if password is available (will be null for public key auth)
+        _password = args.Password;
+
+        var authMethod = string.IsNullOrEmpty(_password) ? "publickey" : "password";
+        _logger.LogDebug("SFTP auth attempt for user: {Username}, method: {Method}",
+            _username, authMethod);
 
         // Resolve backend based on username
         var result = ResolveBackend(_username);
@@ -176,17 +179,21 @@ public class SftpSessionHandler : IDisposable
 
         try
         {
-            // For password auth, we need the password from the auth event
-            // FxSsh's standard auth doesn't provide password - need FxSsh.PwAuth
-            // For now, use a placeholder that can be extended
-            var password = _password ?? string.Empty;
-
             // Parse actual username if format is user@backend
             var actualUsername = _username;
             var atIndex = _username.LastIndexOf('@');
             if (atIndex > 0)
             {
                 actualUsername = _username[..atIndex];
+            }
+
+            // Use the password captured from FxSsh.PwAuth authentication
+            var password = _password ?? string.Empty;
+
+            if (string.IsNullOrEmpty(password))
+            {
+                _logger.LogWarning("No password available for backend authentication. " +
+                    "Client may have used public key auth which cannot be proxied to password-based backend.");
             }
 
             // Create SFTP connection to backend
@@ -202,7 +209,8 @@ public class SftpSessionHandler : IDisposable
             _backendClient = new SftpClient(connectionInfo);
             _backendClient.Connect();
 
-            _logger.LogDebug("Connected to backend SFTP server {Backend}", _backendServer.Name);
+            _logger.LogInformation("Connected to backend SFTP server {Backend} as {User}",
+                _backendServer.Name, actualUsername);
             return true;
         }
         catch (Exception ex)
