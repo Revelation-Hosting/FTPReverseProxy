@@ -4,7 +4,6 @@ using FtpReverseProxy.Data.Entities;
 using FtpReverseProxy.Data.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
-using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -58,7 +57,6 @@ if (app.Configuration.GetValue<bool>("AutoMigrate"))
 }
 
 app.MapOpenApi();
-app.MapScalarApiReference();
 
 // Health check endpoint
 app.MapGet("/health", async (FtpProxyDbContext db) =>
