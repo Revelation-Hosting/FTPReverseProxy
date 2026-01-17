@@ -16,6 +16,16 @@ public class BackendCredentials
     public required string Password { get; set; }
 
     /// <summary>
+    /// Path to private key file for SSH key-based authentication (SFTP)
+    /// </summary>
+    public string? PrivateKeyPath { get; set; }
+
+    /// <summary>
+    /// Password for encrypted private key (if applicable)
+    /// </summary>
+    public string? PrivateKeyPassword { get; set; }
+
+    /// <summary>
     /// Original username provided by the client (for audit purposes)
     /// </summary>
     public string? OriginalUsername { get; set; }

@@ -1,6 +1,7 @@
 using FtpReverseProxy.Core.Configuration;
 using FtpReverseProxy.Core.Interfaces;
 using FtpReverseProxy.Ftp;
+using FtpReverseProxy.Sftp;
 using Microsoft.Extensions.Options;
 
 namespace FtpReverseProxy.Service;
@@ -87,15 +88,17 @@ public class Worker : BackgroundService
         // Start SFTP listener
         if (_config.Sftp.Enabled)
         {
-            if (string.IsNullOrEmpty(_config.Sftp.HostKeyPath))
-            {
-                _logger.LogWarning("SFTP is enabled but no host key is configured. Skipping.");
-            }
-            else
-            {
-                // TODO: Implement SFTP listener
-                _logger.LogWarning("SFTP listener not yet implemented");
-            }
+            var sftpListener = new SftpListener(
+                _config.Sftp.ListenAddress,
+                _config.Sftp.Port,
+                _serviceProvider,
+                _serviceProvider.GetRequiredService<ILogger<SftpListener>>(),
+                _config.Sftp.HostKeyPath);
+
+            _listeners.Add(sftpListener);
+            _ = sftpListener.StartAsync(stoppingToken);
+
+            _logger.LogInformation("SFTP listener started (note: full SFTP proxying requires additional implementation)");
         }
 
         _logger.LogInformation("Started {Count} listener(s)", _listeners.Count);
