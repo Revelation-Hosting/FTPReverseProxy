@@ -22,6 +22,21 @@ public class BackendServerEntity
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? ModifiedAt { get; set; }
 
+    /// <summary>
+    /// Client-facing hostname(s) for SNI certificate selection (comma-separated)
+    /// </summary>
+    public string? ClientFacingHostnames { get; set; }
+
+    /// <summary>
+    /// Path to the client-facing TLS certificate (PFX format) for this backend
+    /// </summary>
+    public string? ClientCertificatePath { get; set; }
+
+    /// <summary>
+    /// Password for the client-facing certificate file
+    /// </summary>
+    public string? ClientCertificatePassword { get; set; }
+
     // Navigation
     public ICollection<RouteMappingEntity> RouteMappings { get; set; } = new List<RouteMappingEntity>();
 }

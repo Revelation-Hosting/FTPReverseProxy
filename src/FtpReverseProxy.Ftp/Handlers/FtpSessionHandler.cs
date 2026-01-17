@@ -90,8 +90,10 @@ public class FtpSessionHandler : IDisposable
                 await UpgradeToTlsAsync(cancellationToken);
             }
 
-            _reader = new StreamReader(_clientStream, Encoding.UTF8);
-            _writer = new StreamWriter(_clientStream, Encoding.UTF8) { AutoFlush = true };
+            // Use UTF8 without BOM - FTP clients can't handle BOM in responses
+            var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            _reader = new StreamReader(_clientStream, utf8NoBom);
+            _writer = new StreamWriter(_clientStream, utf8NoBom) { AutoFlush = true };
 
             // Send welcome banner
             await SendResponseAsync(FtpResponseParser.Codes.ServiceReady, "FTP Proxy Server Ready");
@@ -655,24 +657,56 @@ public class FtpSessionHandler : IDisposable
     {
         _session.State = SessionState.TlsNegotiation;
 
-        var certProvider = _serviceProvider.GetRequiredService<ICertificateProvider>();
-        var certificate = certProvider.GetServerCertificate();
+        // Try SNI certificate manager first, fall back to legacy certificate provider
+        var sniCertManager = _serviceProvider.GetService<ISniCertificateManager>();
+        var certProvider = _serviceProvider.GetService<ICertificateProvider>();
 
-        if (certificate is null)
+        // Check if we have any certificates available
+        var defaultCert = sniCertManager?.GetDefaultCertificate() ?? certProvider?.GetServerCertificate();
+        if (defaultCert is null && sniCertManager?.GetRegisteredHostnames().Count == 0)
         {
             _logger.LogError("TLS upgrade requested but no certificate configured");
             throw new InvalidOperationException("No TLS certificate configured");
         }
 
         var sslStream = new SslStream(_clientStream, false);
-        await sslStream.AuthenticateAsServerAsync(
-            certificate,
-            clientCertificateRequired: false,
-            checkCertificateRevocation: false);
+
+        // Use SNI-based certificate selection
+        var sslOptions = new SslServerAuthenticationOptions
+        {
+            ClientCertificateRequired = false,
+            CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck,
+            ServerCertificateSelectionCallback = (sender, hostName) =>
+            {
+                _logger.LogDebug("SNI certificate selection for hostname: {Hostname}", hostName ?? "(none)");
+
+                // Try SNI manager first
+                var cert = sniCertManager?.GetCertificateForHost(hostName);
+                if (cert is not null)
+                {
+                    _logger.LogDebug("Using SNI certificate: {Subject}", cert.Subject);
+                    return cert;
+                }
+
+                // Fall back to legacy certificate provider
+                cert = certProvider?.GetServerCertificate();
+                if (cert is not null)
+                {
+                    _logger.LogDebug("Using default certificate: {Subject}", cert.Subject);
+                    return cert;
+                }
+
+                _logger.LogWarning("No certificate found for hostname {Hostname}", hostName);
+                return null!;
+            }
+        };
+
+        await sslStream.AuthenticateAsServerAsync(sslOptions, cancellationToken);
 
         _clientStream = sslStream;
-        _reader = new StreamReader(_clientStream, Encoding.UTF8);
-        _writer = new StreamWriter(_clientStream, Encoding.UTF8) { AutoFlush = true };
+        var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        _reader = new StreamReader(_clientStream, utf8NoBom);
+        _writer = new StreamWriter(_clientStream, utf8NoBom) { AutoFlush = true };
 
         _session.ClientTlsEnabled = true;
         _session.State = SessionState.Connected;

@@ -62,8 +62,9 @@ public class FtpBackendConnection : IBackendConnection
             await UpgradeToTlsAsync(cancellationToken);
         }
 
-        _reader = new StreamReader(_stream, Encoding.UTF8);
-        _writer = new StreamWriter(_stream, Encoding.UTF8) { AutoFlush = true };
+        var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        _reader = new StreamReader(_stream, utf8NoBom);
+        _writer = new StreamWriter(_stream, utf8NoBom) { AutoFlush = true };
 
         // Read welcome banner
         var banner = await ReadResponseAsync(cancellationToken);
@@ -72,6 +73,13 @@ public class FtpBackendConnection : IBackendConnection
         if (!banner.IsSuccess && banner.Code != FtpResponseParser.Codes.ServiceReady)
         {
             throw new InvalidOperationException($"Backend server returned error: {banner.RawResponse}");
+        }
+
+        // Handle explicit TLS (upgrade after banner, before authentication)
+        if (server.Protocol == Protocol.FtpsExplicit)
+        {
+            _logger.LogDebug("Upgrading to TLS for explicit FTPS backend {BackendName}", server.Name);
+            await UpgradeToTlsAsync(cancellationToken);
         }
     }
 
@@ -141,8 +149,9 @@ public class FtpBackendConnection : IBackendConnection
         await sslStream.AuthenticateAsClientAsync(_server.Host);
 
         _stream = sslStream;
-        _reader = new StreamReader(_stream, Encoding.UTF8);
-        _writer = new StreamWriter(_stream, Encoding.UTF8) { AutoFlush = true };
+        var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        _reader = new StreamReader(_stream, utf8NoBom);
+        _writer = new StreamWriter(_stream, utf8NoBom) { AutoFlush = true };
 
         IsTlsEnabled = true;
 

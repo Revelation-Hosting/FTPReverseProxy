@@ -2,7 +2,27 @@
 
 A high-performance reverse proxy for FTP, FTPS, and SFTP connections built with .NET 10. Routes connections to backend servers based on configurable username patterns with full protocol termination and credential mapping.
 
-## Features
+**Perfect for consolidating FTP infrastructure** from multiple domains, acquisitions, or data centers into a single entry point while maintaining separate backend servers.
+
+## Key Features
+
+### Multi-Domain SNI Support (NEW)
+
+Consolidate multiple FTP domains behind a single proxy with **SNI-based certificate selection**:
+
+```
+ftp.companya.com  ─┐
+ftp.companyb.org  ─┼─► FTP Reverse Proxy ─┬─► Backend Server A
+ftp.companyc.net  ─┘   (single IP)        ├─► Backend Server B
+                                          └─► Backend Server C
+```
+
+- **One proxy, multiple domains** - Each domain gets its own TLS certificate
+- **Seamless acquisitions** - Add new company domains without infrastructure changes
+- **Zero client changes** - Clients connect to their familiar hostnames
+- **Per-backend certificates** - Configure different certificates for different backends
+
+### Core Features
 
 - **Multi-Protocol Support**: FTP (port 21), FTPS Implicit (port 990), and SFTP (port 22)
 - **Username-Based Routing**: Route connections to different backends based on username patterns
@@ -20,6 +40,20 @@ A high-performance reverse proxy for FTP, FTPS, and SFTP connections built with 
 - **Optional Redis Caching**: High-performance caching for route lookups
 - **OpenTelemetry Metrics**: Prometheus-compatible metrics endpoint
 - **Graceful Shutdown**: Configurable drain period for active sessions
+
+## Use Cases
+
+### Consolidate Acquired Companies
+After acquiring companies, each with their own FTP servers (`ftp.acquired1.com`, `ftp.acquired2.net`), route all traffic through one proxy while keeping existing client configurations working.
+
+### Cloud Migration
+Abstract backend FTP servers during migration from on-premises to cloud. Move backends transparently without client changes.
+
+### Multi-Tenant Hosting
+Provide branded FTP endpoints (`ftp.client1.com`, `ftp.client2.com`) that all route through your infrastructure with proper certificate handling.
+
+### Load Distribution
+Route different usernames or patterns to different backend servers for load distribution or data segregation.
 
 ## Architecture
 
@@ -98,6 +132,110 @@ dotnet ef database update --startup-project ../FtpReverseProxy.Service
 cd src/FtpReverseProxy.Service
 dotnet run
 ```
+
+## Multi-Domain Setup
+
+This section explains how to configure the proxy to handle multiple domains with their own TLS certificates.
+
+### How SNI Works
+
+When a client connects via FTPS, the TLS handshake includes the hostname they're connecting to (Server Name Indication). The proxy uses this to select the appropriate certificate:
+
+```
+1. Client connects to ftp.companya.com:990
+2. TLS handshake includes SNI: "ftp.companya.com"
+3. Proxy looks up certificate for that hostname
+4. Proxy presents Company A's certificate
+5. Client validates certificate, connection proceeds
+6. Username determines which backend to route to
+```
+
+### Step-by-Step Setup
+
+#### 1. Prepare Your Certificates
+
+Convert your certificates to PFX format if needed:
+
+```bash
+# From PEM files
+openssl pkcs12 -export -out companya.pfx -inkey companya.key -in companya.crt -certfile ca-chain.crt
+
+# From existing PFX, just copy it
+cp /path/to/companya.pfx ./certs/
+```
+
+#### 2. Mount Certificates in Docker
+
+```yaml
+# docker-compose.yml
+services:
+  ftp-proxy:
+    volumes:
+      - ./certs:/app/certs:ro
+```
+
+#### 3. Configure Backends with Certificates
+
+```bash
+# Create backend for Company A
+curl -X POST http://localhost:8080/api/backends \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Company A FTP",
+    "host": "10.0.1.50",
+    "port": 21,
+    "protocol": 1,
+    "clientFacingHostnames": "ftp.companya.com,sftp.companya.com",
+    "clientCertificatePath": "/app/certs/companya.pfx",
+    "clientCertificatePassword": "password1",
+    "isEnabled": true
+  }'
+
+# Create backend for Company B
+curl -X POST http://localhost:8080/api/backends \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Company B FTP",
+    "host": "10.0.2.50",
+    "port": 21,
+    "protocol": 1,
+    "clientFacingHostnames": "ftp.companyb.org",
+    "clientCertificatePath": "/app/certs/companyb.pfx",
+    "clientCertificatePassword": "password2",
+    "isEnabled": true
+  }'
+```
+
+#### 4. Create Route Mappings
+
+```bash
+# Route users to appropriate backends
+curl -X POST http://localhost:8080/api/routes \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "backendServerId": "company-a-backend-id",
+    "isEnabled": true
+  }'
+```
+
+#### 5. Update DNS
+
+Point all your domain DNS records to the proxy's IP address:
+
+```
+ftp.companya.com    A    203.0.113.10
+ftp.companyb.org    A    203.0.113.10
+ftp.companyc.net    A    203.0.113.10
+```
+
+### SFTP Considerations
+
+SFTP uses SSH, which doesn't support SNI. For multi-domain SFTP:
+
+- **Single host key** - All domains share one SSH host key
+- **Document the fingerprint** - Tell users to accept the proxy's host key
+- **Routing still works** - Username-based routing functions normally
 
 ## Configuration
 
@@ -193,14 +331,17 @@ The proxy includes a REST API for managing backends and routing rules.
 # List all backends
 GET /api/backends
 
-# Create a backend
+# Create a backend with SNI certificate support
 POST /api/backends
 {
-  "name": "Production FTP",
-  "host": "ftp.internal.local",
+  "name": "Company A FTP",
+  "host": "10.0.1.50",
   "port": 21,
-  "protocol": "Ftp",
-  "isEnabled": true
+  "protocol": "FtpsExplicit",
+  "isEnabled": true,
+  "clientFacingHostnames": "ftp.companya.com,sftp.companya.com",
+  "clientCertificatePath": "/app/certs/companya.pfx",
+  "clientCertificatePassword": "cert-password"
 }
 
 # Update a backend
@@ -209,6 +350,20 @@ PUT /api/backends/{id}
 # Delete a backend
 DELETE /api/backends/{id}
 ```
+
+### Backend Server Fields
+
+| Field | Description |
+|-------|-------------|
+| `name` | Display name for this backend |
+| `host` | Hostname or IP of the backend server |
+| `port` | Port number (default: 21) |
+| `protocol` | `Ftp`, `FtpsExplicit`, `FtpsImplicit`, or `Sftp` |
+| `credentialMapping` | `Passthrough`, `ServiceAccount`, or `Mapped` |
+| `clientFacingHostnames` | Comma-separated hostnames for SNI certificate selection |
+| `clientCertificatePath` | Path to PFX certificate for these hostnames |
+| `clientCertificatePassword` | Password for the certificate file |
+| `maxConnections` | Max concurrent connections (0 = unlimited) |
 
 ### Route Mappings
 
@@ -289,21 +444,20 @@ dotnet test --collect:"XPlat Code Coverage"
 
 ## Docker
 
-```dockerfile
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
-WORKDIR /app
-EXPOSE 21 990 22 50000-51000
+Quick start with Docker Compose:
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
-WORKDIR /src
-COPY . .
-RUN dotnet publish src/FtpReverseProxy.Service -c Release -o /app/publish
+```bash
+# Start all services
+docker-compose up -d
 
-FROM base AS final
-WORKDIR /app
-COPY --from=build /app/publish .
-ENTRYPOINT ["dotnet", "FtpReverseProxy.Service.dll"]
+# Check logs
+docker logs -f ftp-reverse-proxy
+
+# Rebuild after code changes
+docker-compose down && docker-compose build --no-cache ftp-proxy && docker-compose up -d
 ```
+
+For comprehensive Docker instructions including configuration, rebuilding, and troubleshooting, see **[docs/DOCKER.md](docs/DOCKER.md)**.
 
 ## Security Considerations
 

@@ -73,6 +73,9 @@ services:
       # Redis (optional caching)
       - Proxy__Redis__Enabled=true
       - Proxy__Redis__ConnectionString=redis:6379
+
+      # Backend TLS validation (allow name mismatch for backends with mismatched certs)
+      - Proxy__BackendTls__AllowNameMismatch=true
     volumes:
       # Mount certificates directory
       - ./certs:/app/certs:ro

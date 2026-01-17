@@ -66,4 +66,22 @@ public class BackendServer
     /// Maximum concurrent connections allowed to this backend (0 = unlimited)
     /// </summary>
     public int MaxConnections { get; set; } = 0;
+
+    /// <summary>
+    /// Client-facing hostname(s) for SNI certificate selection.
+    /// When clients connect via FTPS using these hostnames, the corresponding certificate is presented.
+    /// Comma-separated for multiple hostnames (e.g., "ftp.companya.com,sftp.companya.com")
+    /// </summary>
+    public string? ClientFacingHostnames { get; set; }
+
+    /// <summary>
+    /// Path to the client-facing TLS certificate (PFX/PKCS12 format) for this backend.
+    /// Used when clients connect via FTPS to the hostnames specified in ClientFacingHostnames.
+    /// </summary>
+    public string? ClientCertificatePath { get; set; }
+
+    /// <summary>
+    /// Password for the client-facing certificate file.
+    /// </summary>
+    public string? ClientCertificatePassword { get; set; }
 }
