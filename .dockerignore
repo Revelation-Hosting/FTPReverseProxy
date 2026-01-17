@@ -1,0 +1,40 @@
+# Build outputs
+**/bin/
+**/obj/
+**/out/
+
+# IDE/Editor directories
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Test results
+**/TestResults/
+
+# NuGet
+*.nupkg
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+*.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Certificates (mounted as volumes instead)
+certs/
+
+# Local settings
+**/appsettings.Development.json
+**/appsettings.Local.json

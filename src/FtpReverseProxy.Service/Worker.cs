@@ -1,23 +1,130 @@
+using FtpReverseProxy.Core.Configuration;
+using FtpReverseProxy.Core.Interfaces;
+using FtpReverseProxy.Ftp;
+using Microsoft.Extensions.Options;
+
 namespace FtpReverseProxy.Service;
 
 public class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly ProxyConfiguration _config;
+    private readonly List<IProxyListener> _listeners = new();
 
-    public Worker(ILogger<Worker> logger)
+    public Worker(
+        ILogger<Worker> logger,
+        IServiceProvider serviceProvider,
+        IOptions<ProxyConfiguration> config)
     {
         _logger = logger;
+        _serviceProvider = serviceProvider;
+        _config = config.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
+        _logger.LogInformation("FTP Reverse Proxy starting...");
+
+        try
         {
-            if (_logger.IsEnabled(LogLevel.Information))
-            {
-                _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
-            }
-            await Task.Delay(1000, stoppingToken);
+            await StartListenersAsync(stoppingToken);
+
+            // Wait until cancellation is requested
+            await Task.Delay(Timeout.Infinite, stoppingToken);
         }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Shutdown requested");
+        }
+        finally
+        {
+            await StopListenersAsync();
+        }
+    }
+
+    private async Task StartListenersAsync(CancellationToken stoppingToken)
+    {
+        var sessionManager = _serviceProvider.GetRequiredService<ISessionManager>();
+
+        // Start FTP listener
+        if (_config.Ftp.Enabled)
+        {
+            var ftpListener = new FtpListener(
+                _config.Ftp.ListenAddress,
+                _config.Ftp.Port,
+                _serviceProvider,
+                sessionManager,
+                _serviceProvider.GetRequiredService<ILogger<FtpListener>>(),
+                implicitTls: false);
+
+            _listeners.Add(ftpListener);
+            _ = ftpListener.StartAsync(stoppingToken);
+        }
+
+        // Start FTPS implicit listener
+        if (_config.FtpsImplicit.Enabled)
+        {
+            if (_config.TlsCertificate is null || string.IsNullOrEmpty(_config.TlsCertificate.Path))
+            {
+                _logger.LogWarning("FTPS Implicit is enabled but no TLS certificate is configured. Skipping.");
+            }
+            else
+            {
+                var ftpsListener = new FtpListener(
+                    _config.FtpsImplicit.ListenAddress,
+                    _config.FtpsImplicit.Port,
+                    _serviceProvider,
+                    sessionManager,
+                    _serviceProvider.GetRequiredService<ILogger<FtpListener>>(),
+                    implicitTls: true);
+
+                _listeners.Add(ftpsListener);
+                _ = ftpsListener.StartAsync(stoppingToken);
+            }
+        }
+
+        // Start SFTP listener
+        if (_config.Sftp.Enabled)
+        {
+            if (string.IsNullOrEmpty(_config.Sftp.HostKeyPath))
+            {
+                _logger.LogWarning("SFTP is enabled but no host key is configured. Skipping.");
+            }
+            else
+            {
+                // TODO: Implement SFTP listener
+                _logger.LogWarning("SFTP listener not yet implemented");
+            }
+        }
+
+        _logger.LogInformation("Started {Count} listener(s)", _listeners.Count);
+
+        foreach (var listener in _listeners)
+        {
+            _logger.LogInformation("  - {Protocol} on {Address}:{Port}",
+                listener.Protocol, listener.ListenAddress, listener.Port);
+        }
+    }
+
+    private async Task StopListenersAsync()
+    {
+        _logger.LogInformation("Stopping {Count} listener(s)...", _listeners.Count);
+
+        foreach (var listener in _listeners)
+        {
+            try
+            {
+                await listener.StopAsync();
+                await listener.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error stopping {Protocol} listener", listener.Protocol);
+            }
+        }
+
+        _listeners.Clear();
+        _logger.LogInformation("All listeners stopped");
     }
 }

@@ -22,6 +22,11 @@ public interface IProxyListener : IAsyncDisposable
     bool IsListening { get; }
 
     /// <summary>
+    /// The IP address this listener is bound to
+    /// </summary>
+    string ListenAddress { get; }
+
+    /// <summary>
     /// The port this listener is bound to
     /// </summary>
     int Port { get; }

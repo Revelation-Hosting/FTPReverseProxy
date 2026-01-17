@@ -12,6 +12,7 @@ namespace FtpReverseProxy.Ftp;
 /// </summary>
 public class FtpListener : IProxyListener
 {
+    private readonly IPAddress _listenAddress;
     private readonly int _port;
     private readonly IServiceProvider _serviceProvider;
     private readonly ISessionManager _sessionManager;
@@ -22,12 +23,14 @@ public class FtpListener : IProxyListener
     private CancellationTokenSource? _cts;
 
     public FtpListener(
+        string listenAddress,
         int port,
         IServiceProvider serviceProvider,
         ISessionManager sessionManager,
         ILogger<FtpListener> logger,
         bool implicitTls = false)
     {
+        _listenAddress = IPAddress.Parse(listenAddress);
         _port = port;
         _serviceProvider = serviceProvider;
         _sessionManager = sessionManager;
@@ -36,6 +39,7 @@ public class FtpListener : IProxyListener
     }
 
     public bool IsListening => _listener?.Server.IsBound ?? false;
+    public string ListenAddress => _listenAddress.ToString();
     public int Port => _port;
     public string Protocol => _implicitTls ? "FTPS (Implicit)" : "FTP";
 
@@ -44,12 +48,12 @@ public class FtpListener : IProxyListener
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _listener = new TcpListener(IPAddress.Any, _port);
+        _listener = new TcpListener(_listenAddress, _port);
 
         try
         {
             _listener.Start();
-            _logger.LogInformation("{Protocol} listener started on port {Port}", Protocol, _port);
+            _logger.LogInformation("{Protocol} listener started on {Address}:{Port}", Protocol, _listenAddress, _port);
 
             while (!_cts.Token.IsCancellationRequested)
             {
@@ -70,7 +74,7 @@ public class FtpListener : IProxyListener
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error starting {Protocol} listener on port {Port}", Protocol, _port);
+            _logger.LogError(ex, "Error starting {Protocol} listener on {Address}:{Port}", Protocol, _listenAddress, _port);
             throw;
         }
     }
@@ -79,7 +83,7 @@ public class FtpListener : IProxyListener
     {
         _cts?.Cancel();
         _listener?.Stop();
-        _logger.LogInformation("{Protocol} listener stopped on port {Port}", Protocol, _port);
+        _logger.LogInformation("{Protocol} listener stopped on {Address}:{Port}", Protocol, _listenAddress, _port);
         return Task.CompletedTask;
     }
 

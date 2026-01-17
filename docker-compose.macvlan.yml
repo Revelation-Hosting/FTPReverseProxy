@@ -1,0 +1,128 @@
+# Docker Compose with macvlan network for separate IP address
+# This allows the FTP proxy to have its own IP on your network,
+# avoiding port conflicts with the host (e.g., SSH on port 22)
+#
+# SETUP INSTRUCTIONS:
+# 1. Identify your network interface (e.g., eth0, ens192)
+# 2. Determine your network's subnet, gateway, and an available IP
+# 3. Update the macvlan network configuration below
+# 4. Run: docker-compose -f docker-compose.macvlan.yml up -d
+#
+# NOTE: macvlan requires the host to be on a bridged network (not NAT)
+# and may require promiscuous mode on the network interface.
+
+services:
+  ftp-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ftp-reverse-proxy
+    restart: unless-stopped
+    # No port mapping needed - container has its own IP
+    environment:
+      # Logging
+      - Logging__LogLevel__Default=Information
+      - Logging__LogLevel__FtpReverseProxy=Debug
+
+      # FTP Listener - bind to all interfaces in container
+      - Proxy__Ftp__Enabled=true
+      - Proxy__Ftp__ListenAddress=0.0.0.0
+      - Proxy__Ftp__Port=21
+
+      # FTPS Implicit
+      - Proxy__FtpsImplicit__Enabled=true
+      - Proxy__FtpsImplicit__ListenAddress=0.0.0.0
+      - Proxy__FtpsImplicit__Port=990
+      - Proxy__TlsCertificate__Path=/app/certs/server.pfx
+      - Proxy__TlsCertificate__Password=changeme
+
+      # SFTP - can use port 22 since we have our own IP!
+      - Proxy__Sftp__Enabled=true
+      - Proxy__Sftp__ListenAddress=0.0.0.0
+      - Proxy__Sftp__Port=22
+      - Proxy__Sftp__HostKeyPath=/app/certs/ssh_host_rsa_key
+
+      # Data Channel - use the container's IP for passive mode
+      - Proxy__DataChannel__MinPort=50000
+      - Proxy__DataChannel__MaxPort=51000
+      # IMPORTANT: Set this to the container's macvlan IP
+      - Proxy__DataChannel__ExternalAddress=192.168.1.100
+
+      # Database (PostgreSQL)
+      - Proxy__Database__Provider=PostgreSQL
+      - Proxy__Database__ConnectionString=Host=postgres;Database=ftpproxy;Username=ftpproxy;Password=ftpproxy
+
+      # Redis
+      - Proxy__Redis__Enabled=true
+      - Proxy__Redis__ConnectionString=redis:6379
+    volumes:
+      - ./certs:/app/certs:ro
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      ftp-proxy-macvlan:
+        # Assign a specific IP to the container
+        ipv4_address: 192.168.1.100
+      ftp-proxy-internal:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ftp-proxy-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=ftpproxy
+      - POSTGRES_USER=ftpproxy
+      - POSTGRES_PASSWORD=ftpproxy
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - ftp-proxy-internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: ftp-proxy-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - ftp-proxy-internal
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  # Internal network for database/redis communication
+  ftp-proxy-internal:
+    driver: bridge
+
+  # Macvlan network for external access with dedicated IP
+  # CUSTOMIZE THESE VALUES FOR YOUR NETWORK:
+  ftp-proxy-macvlan:
+    driver: macvlan
+    driver_opts:
+      # Your network interface name (check with: ip link show)
+      parent: eth0
+    ipam:
+      config:
+        # Your network's subnet
+        - subnet: 192.168.1.0/24
+          # Your network's gateway
+          gateway: 192.168.1.1
+          # IP range for containers (can be a single IP)
+          ip_range: 192.168.1.100/32
+
+# ALTERNATIVE: Using ipvlan instead of macvlan (works better in some environments)
+# Replace the ftp-proxy-macvlan network with:
+#
+#   ftp-proxy-ipvlan:
+#     driver: ipvlan
+#     driver_opts:
+#       parent: eth0
+#       ipvlan_mode: l2
+#     ipam:
+#       config:
+#         - subnet: 192.168.1.0/24
+#           gateway: 192.168.1.1
+#           ip_range: 192.168.1.100/32

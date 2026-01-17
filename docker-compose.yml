@@ -1,0 +1,95 @@
+# Basic docker-compose for FTP Reverse Proxy
+# This configuration uses standard port mapping
+# For separate IP configuration, see docker-compose.macvlan.yml
+
+services:
+  ftp-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ftp-reverse-proxy
+    restart: unless-stopped
+    ports:
+      # FTP control port
+      - "21:21"
+      # FTPS implicit port (uncomment when certificate is configured)
+      # - "990:990"
+      # SFTP port (uncomment when host key is configured)
+      # - "2222:22"  # Using 2222 to avoid conflict with host SSH
+      # Data channel port range for passive mode
+      - "50000-51000:50000-51000"
+    environment:
+      # Logging
+      - Logging__LogLevel__Default=Information
+      - Logging__LogLevel__FtpReverseProxy=Debug
+
+      # FTP Listener
+      - Proxy__Ftp__Enabled=true
+      - Proxy__Ftp__ListenAddress=0.0.0.0
+      - Proxy__Ftp__Port=21
+
+      # FTPS Implicit (disabled until certificate is configured)
+      - Proxy__FtpsImplicit__Enabled=false
+
+      # SFTP (disabled until host key is configured)
+      - Proxy__Sftp__Enabled=false
+
+      # Data Channel
+      - Proxy__DataChannel__MinPort=50000
+      - Proxy__DataChannel__MaxPort=51000
+      # Set this to your external IP for NAT/firewall scenarios
+      # - Proxy__DataChannel__ExternalAddress=YOUR_PUBLIC_IP
+
+      # Database (PostgreSQL)
+      - Proxy__Database__Provider=PostgreSQL
+      - Proxy__Database__ConnectionString=Host=postgres;Database=ftpproxy;Username=ftpproxy;Password=ftpproxy
+
+      # Redis (optional caching)
+      - Proxy__Redis__Enabled=true
+      - Proxy__Redis__ConnectionString=redis:6379
+    volumes:
+      # Mount certificates directory
+      - ./certs:/app/certs:ro
+      # Optional: Override configuration file
+      # - ./appsettings.Production.json:/app/appsettings.Production.json:ro
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - ftp-proxy-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ftp-proxy-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=ftpproxy
+      - POSTGRES_USER=ftpproxy
+      - POSTGRES_PASSWORD=ftpproxy
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - ftp-proxy-network
+    # Uncomment to expose PostgreSQL for external access
+    # ports:
+    #   - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    container_name: ftp-proxy-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - ftp-proxy-network
+    # Uncomment to expose Redis for external access
+    # ports:
+    #   - "6379:6379"
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  ftp-proxy-network:
+    driver: bridge
