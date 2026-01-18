@@ -118,7 +118,15 @@ appsettings.Local.json
 *.p12
 *.pem
 *.key
+*.crt
 secrets.json
+
+# Certificates and config folders (contain sensitive data)
+certs/
+config/
+
+# Windows artifacts
+nul
 
 # Entity Framework
 *.db
@@ -135,3 +143,6 @@ wwwroot/lib/
 
 # Publish
 publish/
+
+# Local scripts (personal workflow helpers)
+rebuild.ps1

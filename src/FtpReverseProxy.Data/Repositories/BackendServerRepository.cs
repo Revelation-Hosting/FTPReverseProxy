@@ -83,6 +83,10 @@ public class BackendServerRepository : IBackendServerRepository
         entity.Description = server.Description;
         entity.ConnectionTimeoutMs = server.ConnectionTimeoutMs;
         entity.MaxConnections = server.MaxConnections;
+        entity.ClientFacingHostnames = server.ClientFacingHostnames;
+        entity.ClientCertificatePath = server.ClientCertificatePath;
+        entity.ClientCertificatePassword = server.ClientCertificatePassword;
+        entity.SkipCertificateValidation = server.SkipCertificateValidation;
         entity.ModifiedAt = DateTime.UtcNow;
 
         await _context.SaveChangesAsync(cancellationToken);
@@ -120,7 +124,11 @@ public class BackendServerRepository : IBackendServerRepository
         IsEnabled = entity.IsEnabled,
         Description = entity.Description,
         ConnectionTimeoutMs = entity.ConnectionTimeoutMs,
-        MaxConnections = entity.MaxConnections
+        MaxConnections = entity.MaxConnections,
+        ClientFacingHostnames = entity.ClientFacingHostnames,
+        ClientCertificatePath = entity.ClientCertificatePath,
+        ClientCertificatePassword = entity.ClientCertificatePassword,
+        SkipCertificateValidation = entity.SkipCertificateValidation
     };
 
     private static BackendServerEntity MapToEntity(BackendServer model) => new()
@@ -136,6 +144,10 @@ public class BackendServerRepository : IBackendServerRepository
         IsEnabled = model.IsEnabled,
         Description = model.Description,
         ConnectionTimeoutMs = model.ConnectionTimeoutMs,
-        MaxConnections = model.MaxConnections
+        MaxConnections = model.MaxConnections,
+        ClientFacingHostnames = model.ClientFacingHostnames,
+        ClientCertificatePath = model.ClientCertificatePath,
+        ClientCertificatePassword = model.ClientCertificatePassword,
+        SkipCertificateValidation = model.SkipCertificateValidation
     };
 }

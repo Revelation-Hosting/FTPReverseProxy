@@ -1,17 +1,17 @@
-using System.Net.Security;
 using System.Net.Sockets;
-using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using FtpReverseProxy.Core.Enums;
 using FtpReverseProxy.Core.Interfaces;
 using FtpReverseProxy.Core.Models;
 using FtpReverseProxy.Ftp.Parsing;
+using FtpReverseProxy.Ftp.Tls;
 using Microsoft.Extensions.Logging;
 
 namespace FtpReverseProxy.Ftp.Handlers;
 
 /// <summary>
-/// Manages connection to a backend FTP server
+/// Manages connection to a backend FTP server.
+/// Uses native OpenSSL for TLS with session resumption support on data channels.
 /// </summary>
 public class FtpBackendConnection : IBackendConnection
 {
@@ -23,6 +23,8 @@ public class FtpBackendConnection : IBackendConnection
     private StreamReader? _reader;
     private StreamWriter? _writer;
     private BackendServer? _server;
+    private OpenSslTlsStream? _openSslStream;
+    private OpenSslSession? _tlsSession;
 
     public FtpBackendConnection(
         ILogger<FtpBackendConnection> logger,
@@ -34,6 +36,17 @@ public class FtpBackendConnection : IBackendConnection
 
     public bool IsConnected => _client?.Connected ?? false;
     public bool IsTlsEnabled { get; private set; }
+
+    /// <summary>
+    /// Gets the TLS session from the control channel for session resumption on data channel.
+    /// This is an OpenSslSession that wraps the native OpenSSL session pointer.
+    /// </summary>
+    public object? TlsSessionForResumption => _tlsSession;
+
+    /// <summary>
+    /// Gets the underlying socket for health checking (polling).
+    /// </summary>
+    public Socket? GetSocket() => _client?.Client;
 
     public async Task ConnectAsync(BackendServer server, CancellationToken cancellationToken = default)
     {
@@ -62,8 +75,9 @@ public class FtpBackendConnection : IBackendConnection
             await UpgradeToTlsAsync(cancellationToken);
         }
 
-        _reader = new StreamReader(_stream, Encoding.UTF8);
-        _writer = new StreamWriter(_stream, Encoding.UTF8) { AutoFlush = true };
+        var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        _reader = new StreamReader(_stream, utf8NoBom);
+        _writer = new StreamWriter(_stream, utf8NoBom) { AutoFlush = true };
 
         // Read welcome banner
         var banner = await ReadResponseAsync(cancellationToken);
@@ -72,6 +86,13 @@ public class FtpBackendConnection : IBackendConnection
         if (!banner.IsSuccess && banner.Code != FtpResponseParser.Codes.ServiceReady)
         {
             throw new InvalidOperationException($"Backend server returned error: {banner.RawResponse}");
+        }
+
+        // Handle explicit TLS (upgrade after banner, before authentication)
+        if (server.Protocol == Protocol.FtpsExplicit)
+        {
+            _logger.LogDebug("Upgrading to TLS for explicit FTPS backend {BackendName}", server.Name);
+            await UpgradeToTlsAsync(cancellationToken);
         }
     }
 
@@ -114,15 +135,24 @@ public class FtpBackendConnection : IBackendConnection
             throw new InvalidOperationException("Not connected to backend");
         }
 
+        _logger.LogInformation("Sending to backend: {Command}", command.RawCommand);
         await _writer.WriteLineAsync(command.RawCommand);
+        _logger.LogDebug("Command sent, reading backend response...");
         return await ReadResponseAsync(cancellationToken);
     }
 
     public async Task UpgradeToTlsAsync(CancellationToken cancellationToken = default)
     {
-        if (_stream is null || _server is null)
+        if (_stream is null || _server is null || _client is null)
         {
             throw new InvalidOperationException("Not connected");
+        }
+
+        // Skip if TLS is already enabled
+        if (IsTlsEnabled)
+        {
+            _logger.LogDebug("TLS already enabled for backend {BackendName}, skipping UpgradeToTlsAsync", _server.Name);
+            return;
         }
 
         if (_server.Protocol == Protocol.FtpsExplicit)
@@ -137,39 +167,77 @@ public class FtpBackendConnection : IBackendConnection
             }
         }
 
-        var sslStream = new SslStream(_stream, false, _certificateValidator.ValidationCallback);
-        await sslStream.AuthenticateAsClientAsync(_server.Host);
+        // Use native OpenSSL for TLS with proper session resumption support
+        // This allows us to capture the TLS session and resume it on data channels
+        _logger.LogInformation("Upgrading to TLS using native OpenSSL for backend {BackendName}", _server.Name);
 
-        _stream = sslStream;
-        _reader = new StreamReader(_stream, Encoding.UTF8);
-        _writer = new StreamWriter(_stream, Encoding.UTF8) { AutoFlush = true };
+        // OpenSSL Connect is synchronous, so wrap in Task.Run
+        _openSslStream = await Task.Run(() => OpenSslTlsStream.Connect(
+            _client,
+            _server.Host,
+            skipCertificateValidation: _server.SkipCertificateValidation,
+            sessionToResume: IntPtr.Zero, // No session to resume for control channel
+            logger: _logger), cancellationToken);
+
+        // Capture the session for resumption on data channels
+        var sessionPtr = _openSslStream.GetSession();
+        if (sessionPtr != IntPtr.Zero)
+        {
+            _tlsSession = new OpenSslSession(sessionPtr);
+            _logger.LogInformation("OpenSSL: Captured TLS session for data channel resumption. SessionID: {SessionId}",
+                _tlsSession.SessionId);
+        }
+        else
+        {
+            _logger.LogWarning("OpenSSL: Failed to capture TLS session - data channel resumption may not work");
+        }
+
+        _stream = _openSslStream;
+        var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        _reader = new StreamReader(_stream, utf8NoBom);
+        _writer = new StreamWriter(_stream, utf8NoBom) { AutoFlush = true };
 
         IsTlsEnabled = true;
 
-        _logger.LogDebug("TLS upgrade completed for backend {BackendName}", _server.Name);
+        _logger.LogInformation("Control channel TLS established using OpenSSL for backend {BackendName}. Protocol: {Protocol}, Cipher: {Cipher}",
+            _server.Name, _openSslStream.ProtocolVersion, _openSslStream.CipherSuite);
+
+        // Send PBSZ and PROT P to enable protected data channel
+        if (_server.Protocol == Protocol.FtpsExplicit || _server.Protocol == Protocol.FtpsImplicit)
+        {
+            await _writer.WriteLineAsync("PBSZ 0");
+            var pbszResponse = await ReadResponseAsync(cancellationToken);
+            _logger.LogDebug("PBSZ response: {Response}", pbszResponse.RawResponse);
+
+            await _writer.WriteLineAsync("PROT P");
+            var protResponse = await ReadResponseAsync(cancellationToken);
+            _logger.LogDebug("PROT P response: {Response}", protResponse.RawResponse);
+
+            if (protResponse.Code != 200)
+            {
+                _logger.LogWarning("PROT P failed: {Response}. Data transfers may not be encrypted.", protResponse.RawResponse);
+            }
+        }
     }
 
     public async Task DisconnectAsync()
     {
-        if (_writer is not null && IsConnected)
-        {
-            try
-            {
-                await _writer.WriteLineAsync("QUIT");
-                await ReadResponseAsync(CancellationToken.None);
-            }
-            catch
-            {
-                // Ignore errors during disconnect
-            }
-        }
+        // Never send QUIT from the proxy on its own.
+        // If the client wants to quit, they send QUIT and we forward it.
+        // If the client disconnects without QUIT, we just close the socket.
+        // The backend will clean up the connection on its own when it detects the socket close.
+        await Task.CompletedTask; // Keep method async for interface compatibility
 
         _reader?.Dispose();
         _writer?.Dispose();
+        _openSslStream?.Dispose();
+        _tlsSession?.Dispose();
         _client?.Dispose();
 
         _reader = null;
         _writer = null;
+        _openSslStream = null;
+        _tlsSession = null;
         _client = null;
         _stream = null;
     }
@@ -177,10 +245,39 @@ public class FtpBackendConnection : IBackendConnection
     public async Task<FtpResponse> ReadResponseAsync(CancellationToken cancellationToken = default)
     {
         var lines = new List<string>();
-        var firstLine = await _reader!.ReadLineAsync(cancellationToken);
+        string? firstLine = null;
+
+        try
+        {
+            firstLine = await _reader!.ReadLineAsync(cancellationToken);
+        }
+        catch (IOException ioEx)
+        {
+            // Capture underlying exception details
+            var innerMsg = ioEx.InnerException?.Message ?? "none";
+            var socketConnected = _client?.Client?.Connected ?? false;
+            _logger.LogError(ioEx, "IOException reading from backend. SocketConnected: {SocketConnected}, Inner: {Inner}, Server: {Server}",
+                socketConnected, innerMsg, _server?.Name ?? "unknown");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected exception reading from backend: {ExType} - {Message}",
+                ex.GetType().Name, ex.Message);
+            throw;
+        }
 
         if (firstLine is null)
         {
+            // Log additional diagnostics when connection is unexpectedly closed
+            var connected = _client?.Connected ?? false;
+            var socketConnected = _client?.Client?.Connected ?? false;
+            var tlsEnabled = IsTlsEnabled;
+            var socketAvailable = 0;
+            try { socketAvailable = _client?.Client?.Available ?? 0; } catch { }
+
+            _logger.LogWarning("Backend connection closed unexpectedly. TcpClient.Connected: {Connected}, Socket.Connected: {SocketConnected}, TlsEnabled: {TlsEnabled}, BytesAvailable: {Available}, Server: {Server}",
+                connected, socketConnected, tlsEnabled, socketAvailable, _server?.Name ?? "unknown");
             throw new IOException("Connection closed by backend");
         }
 

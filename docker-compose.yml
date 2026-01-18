@@ -43,7 +43,8 @@ services:
       # SFTP port (uncomment when host key is configured)
       # - "2222:22"  # Using 2222 to avoid conflict with host SSH
       # Data channel port range for passive mode
-      - "50000-51000:50000-51000"
+      # Using 30000-30100 to avoid conflicts with Windows ephemeral ports (49152-65535)
+      - "30000-30100:30000-30100"
     environment:
       # Logging
       - Logging__LogLevel__Default=Information
@@ -61,8 +62,8 @@ services:
       - Proxy__Sftp__Enabled=false
 
       # Data Channel
-      - Proxy__DataChannel__MinPort=50000
-      - Proxy__DataChannel__MaxPort=51000
+      - Proxy__DataChannel__MinPort=30000
+      - Proxy__DataChannel__MaxPort=30100
       # Set this to your external IP for NAT/firewall scenarios
       # - Proxy__DataChannel__ExternalAddress=YOUR_PUBLIC_IP
 
@@ -73,6 +74,13 @@ services:
       # Redis (optional caching)
       - Proxy__Redis__Enabled=true
       - Proxy__Redis__ConnectionString=redis:6379
+
+      # Backend TLS validation (allow name mismatch for backends with mismatched certs)
+      - Proxy__BackendTls__AllowNameMismatch=true
+
+      # TLS Certificate for client connections
+      - Proxy__TlsCertificate__Path=/app/certs/server.pfx
+      - Proxy__TlsCertificate__Password=changeit
     volumes:
       # Mount certificates directory
       - ./certs:/app/certs:ro

@@ -107,6 +107,9 @@ app.MapGet("/api/backends", async (FtpProxyDbContext db, bool? enabled) =>
             b.Description,
             b.ConnectionTimeoutMs,
             b.MaxConnections,
+            b.ClientFacingHostnames,
+            b.ClientCertificatePath,
+            b.SkipCertificateValidation,
             b.CreatedAt,
             b.ModifiedAt,
             b.RouteMappings.Count))
@@ -133,6 +136,9 @@ app.MapGet("/api/backends/{id}", async (string id, FtpProxyDbContext db) =>
             b.Description,
             b.ConnectionTimeoutMs,
             b.MaxConnections,
+            b.ClientFacingHostnames,
+            b.ClientCertificatePath,
+            b.SkipCertificateValidation,
             b.CreatedAt,
             b.ModifiedAt,
             b.RouteMappings.Count))
@@ -166,6 +172,10 @@ app.MapPost("/api/backends", async (CreateBackendServerRequest request, FtpProxy
         Description = request.Description,
         ConnectionTimeoutMs = request.ConnectionTimeoutMs,
         MaxConnections = request.MaxConnections,
+        ClientFacingHostnames = request.ClientFacingHostnames,
+        ClientCertificatePath = request.ClientCertificatePath,
+        ClientCertificatePassword = request.ClientCertificatePassword,
+        SkipCertificateValidation = request.SkipCertificateValidation,
         CreatedAt = DateTime.UtcNow
     };
 
@@ -183,6 +193,9 @@ app.MapPost("/api/backends", async (CreateBackendServerRequest request, FtpProxy
         backend.Description,
         backend.ConnectionTimeoutMs,
         backend.MaxConnections,
+        backend.ClientFacingHostnames,
+        backend.ClientCertificatePath,
+        backend.SkipCertificateValidation,
         backend.CreatedAt,
         backend.ModifiedAt,
         0);
@@ -220,6 +233,10 @@ app.MapPut("/api/backends/{id}", async (string id, UpdateBackendServerRequest re
     backend.Description = request.Description;
     backend.ConnectionTimeoutMs = request.ConnectionTimeoutMs;
     backend.MaxConnections = request.MaxConnections;
+    backend.ClientFacingHostnames = request.ClientFacingHostnames;
+    backend.ClientCertificatePath = request.ClientCertificatePath;
+    backend.ClientCertificatePassword = request.ClientCertificatePassword;
+    backend.SkipCertificateValidation = request.SkipCertificateValidation;
     backend.ModifiedAt = DateTime.UtcNow;
 
     await db.SaveChangesAsync();

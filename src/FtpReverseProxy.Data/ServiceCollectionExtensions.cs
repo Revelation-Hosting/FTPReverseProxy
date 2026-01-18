@@ -143,6 +143,9 @@ public static class ServiceCollectionExtensions
         // Metrics (singleton)
         services.AddSingleton<IProxyMetrics, ProxyMetrics>();
 
+        // SNI certificate manager (singleton - caches certificates)
+        services.AddSingleton<ISniCertificateManager, SniCertificateManager>();
+
         return services;
     }
 }
