@@ -55,6 +55,12 @@ public interface IBackendConnection : IAsyncDisposable
     bool IsTlsEnabled { get; }
 
     /// <summary>
+    /// Gets the TLS session from the control channel for session resumption on data channel.
+    /// This is a BouncyCastle TlsSession object.
+    /// </summary>
+    object? TlsSessionForResumption { get; }
+
+    /// <summary>
     /// Disconnects from the backend server
     /// </summary>
     Task DisconnectAsync();

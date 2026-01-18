@@ -28,7 +28,7 @@ public class ProxyConfiguration
     /// <summary>
     /// TLS certificate configuration for FTPS
     /// </summary>
-    public TlsCertificateConfiguration? TlsCertificate { get; set; }
+    public TlsCertificateConfiguration TlsCertificate { get; set; } = new();
 
     /// <summary>
     /// Database connection configuration

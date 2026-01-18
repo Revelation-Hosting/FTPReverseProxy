@@ -35,6 +35,7 @@ ftp.companyc.net  ─┘   (single IP)        ├─► Backend Server B
   - Service account (fixed credentials per backend)
   - Mapped credentials (lookup table)
 - **TLS/SSL Support**: Full FTPS support with configurable certificate validation
+- **TLS Session Resumption**: Automatic session resumption for FTPS data channels (required by many FTP servers)
 - **Data Channel Proxying**: Transparent handling of PASV/EPSV passive mode connections
 - **Database Storage**: PostgreSQL or SQL Server for routing rules and backend configuration
 - **Optional Redis Caching**: High-performance caching for route lookups
@@ -61,17 +62,17 @@ Route different usernames or patterns to different backend servers for load dist
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            FTP Reverse Proxy                            │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                     │
-│  │ FTP Listener│  │FTPS Listener│  │SFTP Listener│                     │
-│  │   (21)      │  │   (990)     │  │    (22)     │                     │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                     │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                      │
+│  │ FTP Listener│  │FTPS Listener│  │SFTP Listener│                      │
+│  │   (21)      │  │   (990)     │  │    (22)     │                      │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                      │
 │         └────────────────┼────────────────┘                             │
 │                          ▼                                              │
-│              ┌───────────────────────┐      ┌──────────────────┐       │
-│              │    Username Router    │◄────►│  Route Config    │       │
-│              └───────────┬───────────┘      │  (PostgreSQL/    │       │
-│                          │                  │   SQL Server)    │       │
-│              ┌───────────▼───────────┐      └──────────────────┘       │
+│              ┌───────────────────────┐      ┌──────────────────┐        │
+│              │    Username Router    │◄────►│  Route Config    │        │
+│              └───────────┬───────────┘      │  (PostgreSQL/    │        │
+│                          │                  │   SQL Server)    │        │
+│              ┌───────────▼───────────┐      └──────────────────┘        │
 │              │  Credential Mapper    │                                  │
 │              └───────────┬───────────┘                                  │
 │                          ▼                                              │
@@ -83,9 +84,9 @@ Route different usernames or patterns to different backend servers for load dist
                                    │
         ┌──────────────────────────┼──────────────────────────┐
         ▼                          ▼                          ▼
-┌───────────────┐        ┌───────────────┐        ┌───────────────┐
-│ Backend FTP 1 │        │ Backend FTP 2 │        │ Backend FTP N │
-└───────────────┘        └───────────────┘        └───────────────┘
+┌───────────────┐          ┌───────────────┐          ┌───────────────┐
+│ Backend FTP 1 │          │ Backend FTP 2 │          │ Backend FTP N │
+└───────────────┘          └───────────────┘          └───────────────┘
 ```
 
 ## Requirements
@@ -321,6 +322,39 @@ SFTP uses SSH, which doesn't support SNI. For multi-domain SFTP:
 - `TrustedThumbprintsOnly`: Only accept certificates matching configured thumbprints
 - `Custom`: Custom validation with configurable options
 
+### TLS Session Resumption for FTPS Backends
+
+Many FTPS servers (including FileZilla Server, vsftpd, and others) enforce a security requirement that the TLS session on the data channel must be a resumption of the control channel's TLS session. This prevents man-in-the-middle attacks on the data channel.
+
+**The Problem for Proxies**
+
+When an FTP proxy sits between client and server, it terminates TLS on both sides:
+- Client <--TLS--> Proxy <--TLS--> Backend
+
+This means the proxy establishes its own TLS sessions with the backend. Without proper session resumption, the backend will reject data channel connections with errors like:
+
+```
+450 TLS session of data connection has not resumed or the session does not match the control connection
+```
+
+**How This Proxy Handles It**
+
+The proxy automatically handles TLS session resumption by:
+
+1. Storing the TLS session parameters from the control channel connection
+2. Reusing the same `SslClientAuthenticationOptions` (including `TargetHost`) for data channel connections
+3. Leveraging .NET's built-in TLS session cache to resume sessions
+
+This is completely transparent - no configuration required. The proxy will work with backends that require session resumption without any changes to the backend server settings.
+
+**Compatibility**
+
+This feature ensures compatibility with:
+- FileZilla Server (requires session resumption by default)
+- vsftpd with `require_ssl_reuse=YES`
+- ProFTPD with `TLSOptions RequireValidClientCert`
+- Any FTPS server enforcing RFC 4217 session resumption recommendations
+
 ## Management API
 
 The proxy includes a REST API for managing backends and routing rules.
@@ -463,6 +497,7 @@ For comprehensive Docker instructions including configuration, rebuilding, and t
 
 - **TLS Certificates**: Always use valid TLS certificates in production
 - **Backend Validation**: Use `SystemDefault` or `TrustedThumbprintsOnly` for backend TLS validation
+- **TLS Session Resumption**: The proxy automatically handles TLS session resumption for data channels, ensuring compatibility with security-hardened FTPS servers
 - **Firewall**: Restrict access to management API and passive port range
 - **Credentials**: Store sensitive configuration in environment variables or a secrets manager
 

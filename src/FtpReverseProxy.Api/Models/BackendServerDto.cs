@@ -18,6 +18,7 @@ public record BackendServerDto(
     int MaxConnections,
     string? ClientFacingHostnames,
     string? ClientCertificatePath,
+    bool SkipCertificateValidation,
     DateTime CreatedAt,
     DateTime? ModifiedAt,
     int RouteMappingsCount);
@@ -39,7 +40,8 @@ public record CreateBackendServerRequest(
     int MaxConnections = 0,
     string? ClientFacingHostnames = null,
     string? ClientCertificatePath = null,
-    string? ClientCertificatePassword = null);
+    string? ClientCertificatePassword = null,
+    bool SkipCertificateValidation = false);
 
 /// <summary>
 /// Request DTO for updating a backend server
@@ -58,4 +60,5 @@ public record UpdateBackendServerRequest(
     int MaxConnections,
     string? ClientFacingHostnames,
     string? ClientCertificatePath,
-    string? ClientCertificatePassword);
+    string? ClientCertificatePassword,
+    bool SkipCertificateValidation);

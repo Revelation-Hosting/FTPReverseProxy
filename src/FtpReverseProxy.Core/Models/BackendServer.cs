@@ -84,4 +84,11 @@ public class BackendServer
     /// Password for the client-facing certificate file.
     /// </summary>
     public string? ClientCertificatePassword { get; set; }
+
+    /// <summary>
+    /// Skip TLS certificate validation when connecting to this backend.
+    /// Use for backends with self-signed or mismatched certificates.
+    /// Default: false (validate certificates)
+    /// </summary>
+    public bool SkipCertificateValidation { get; set; } = false;
 }

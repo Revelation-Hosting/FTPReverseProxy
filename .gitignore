@@ -135,3 +135,6 @@ wwwroot/lib/
 
 # Publish
 publish/
+
+# Local scripts (personal workflow helpers)
+rebuild.ps1

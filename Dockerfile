@@ -27,10 +27,14 @@ RUN dotnet publish src/FtpReverseProxy.Service/FtpReverseProxy.Service.csproj \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview AS runtime
 WORKDIR /app
 
-# Install useful network debugging tools (optional, can be removed for smaller image)
+# Install OpenSSL runtime libraries (required for native TLS session resumption)
+# and useful network debugging tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 \
     netcat-openbsd \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libssl.so \
+    && ln -sf /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so
 
 # Copy published application
 COPY --from=build /app/publish .

@@ -39,6 +39,11 @@ try
         .GetSection("Proxy")
         .Get<ProxyConfiguration>() ?? new ProxyConfiguration();
 
+    // Debug: Log the TLS certificate configuration to diagnose loading issues
+    Log.Information("TLS Configuration - Path: '{Path}', Password: '{PasswordSet}'",
+        proxyConfig.TlsCertificate.Path,
+        string.IsNullOrEmpty(proxyConfig.TlsCertificate.Password) ? "(not set)" : "(set)");
+
     // Add data services (database and Redis)
     if (!string.IsNullOrEmpty(proxyConfig.Database.ConnectionString))
     {
@@ -57,8 +62,8 @@ try
         options.MinPort = proxyConfig.DataChannel.MinPort;
         options.MaxPort = proxyConfig.DataChannel.MaxPort;
         options.ExternalAddress = proxyConfig.DataChannel.ExternalAddress;
-        options.CertificatePath = proxyConfig.TlsCertificate?.Path;
-        options.CertificatePassword = proxyConfig.TlsCertificate?.Password;
+        options.CertificatePath = proxyConfig.TlsCertificate.Path;
+        options.CertificatePassword = proxyConfig.TlsCertificate.Password;
     });
 
     // Add SFTP services

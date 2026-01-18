@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using FtpReverseProxy.Core.Enums;
 using FtpReverseProxy.Core.Interfaces;
 using FtpReverseProxy.Ftp.Handlers;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace FtpReverseProxy.Ftp;
@@ -101,11 +102,15 @@ public class FtpListener : IProxyListener
 
         _logger.LogInformation("New connection from {RemoteEndpoint}", endpoint);
 
+        // Create a new scope for each connection to ensure proper DbContext isolation
+        // This prevents thread-safety issues when multiple connections authenticate concurrently
+        await using var scope = _serviceProvider.CreateAsyncScope();
+
         try
         {
             using var handler = new FtpSessionHandler(
                 client,
-                _serviceProvider,
+                scope.ServiceProvider,
                 _sessionManager,
                 ClientProtocol,
                 _logger);
@@ -114,7 +119,16 @@ public class FtpListener : IProxyListener
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error handling client session from {RemoteEndpoint}", endpoint);
+            // Log with full exception details including type and stack trace
+            _logger.LogError(ex, "Error handling client session from {RemoteEndpoint}. ExType={ExType}, Message={ExMessage}",
+                endpoint, ex.GetType().FullName, ex.Message);
+
+            // Also log inner exception if present
+            if (ex.InnerException != null)
+            {
+                _logger.LogError("Inner exception: {InnerType}: {InnerMessage}",
+                    ex.InnerException.GetType().FullName, ex.InnerException.Message);
+            }
         }
         finally
         {

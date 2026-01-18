@@ -2,6 +2,7 @@ using System.Security.Cryptography.X509Certificates;
 using FtpReverseProxy.Core.Interfaces;
 using FtpReverseProxy.Ftp.DataChannel;
 using FtpReverseProxy.Ftp.Handlers;
+using FtpReverseProxy.Ftp.Tls;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -72,12 +73,31 @@ public static class ServiceCollectionExtensions
             return new CertificateProvider(logger, options.CertificatePath, options.CertificatePassword);
         });
 
+        // Register shared OpenSSL server context as singleton
+        // This enables TLS session resumption between control and data channels
+        services.AddSingleton<OpenSslServerContext>(sp =>
+        {
+            var certProvider = sp.GetRequiredService<ICertificateProvider>();
+            var cert = certProvider.GetServerCertificate();
+
+            if (cert is null)
+            {
+                throw new InvalidOperationException(
+                    "TLS certificate is required for OpenSSL server context. " +
+                    "Configure CertificatePath in DataChannelOptions.");
+            }
+
+            var logger = sp.GetRequiredService<ILogger<OpenSslServerContext>>();
+            return OpenSslServerContext.Create(cert, logger);
+        });
+
         // Register data channel manager as singleton
         services.AddSingleton<IDataChannelManager>(sp =>
         {
             var logger = sp.GetRequiredService<ILogger<DataChannelManager>>();
             var certProvider = sp.GetRequiredService<ICertificateProvider>();
             var certValidator = sp.GetRequiredService<IBackendCertificateValidator>();
+            var sslContext = sp.GetService<OpenSslServerContext>();
 
             return new DataChannelManager(
                 logger,
@@ -85,7 +105,8 @@ public static class ServiceCollectionExtensions
                 options.MinPort,
                 options.MaxPort,
                 options.ExternalAddress,
-                certProvider.GetServerCertificate());
+                certProvider.GetServerCertificate(),
+                sslContext);
         });
 
         return services;

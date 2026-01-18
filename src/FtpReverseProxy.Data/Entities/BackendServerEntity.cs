@@ -37,6 +37,11 @@ public class BackendServerEntity
     /// </summary>
     public string? ClientCertificatePassword { get; set; }
 
+    /// <summary>
+    /// Skip TLS certificate validation when connecting to this backend
+    /// </summary>
+    public bool SkipCertificateValidation { get; set; } = false;
+
     // Navigation
     public ICollection<RouteMappingEntity> RouteMappings { get; set; } = new List<RouteMappingEntity>();
 }
