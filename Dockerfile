@@ -10,6 +10,7 @@ COPY src/FtpReverseProxy.Ftp/*.csproj src/FtpReverseProxy.Ftp/
 COPY src/FtpReverseProxy.Sftp/*.csproj src/FtpReverseProxy.Sftp/
 COPY src/FtpReverseProxy.Service/*.csproj src/FtpReverseProxy.Service/
 COPY src/FtpReverseProxy.Api/*.csproj src/FtpReverseProxy.Api/
+COPY src/FxSsh.Fork/FxSsh/*.csproj src/FxSsh.Fork/FxSsh/
 
 # Restore dependencies
 RUN dotnet restore src/FtpReverseProxy.Service/FtpReverseProxy.Service.csproj

@@ -1,7 +1,9 @@
 using System.Buffers.Binary;
+using System.Text;
 using FxSsh.Services;
 using FtpReverseProxy.Core.Interfaces;
 using FtpReverseProxy.Core.Models;
+using FtpReverseProxy.Core.Services;
 using FtpReverseProxy.Sftp.Protocol;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -22,6 +24,7 @@ public class SftpSessionHandler : IDisposable
 
     private string? _username;
     private string? _password;
+    private bool _usedPublicKeyAuth;
     private BackendServer? _backendServer;
     private RouteMapping? _routeMapping;
     private SftpClient? _backendClient;
@@ -47,23 +50,28 @@ public class SftpSessionHandler : IDisposable
 
     public void Initialize()
     {
+        _logger.LogInformation("SftpSessionHandler initialized, waiting for service registration");
         _session.ServiceRegistered += OnServiceRegistered;
     }
 
     private void OnServiceRegistered(object? sender, SshService service)
     {
+        _logger.LogInformation("SSH service registered: {ServiceType}", service.GetType().Name);
+
         // Handle different SSH service types
-        if (service is UserauthService authService)
+        if (service is UserAuthService authService)
         {
-            authService.Userauth += OnUserAuth;
+            _logger.LogInformation("Attaching to UserAuthService events");
+            authService.UserAuth += OnUserAuth;
         }
         else if (service is ConnectionService connectionService)
         {
+            _logger.LogInformation("Attaching to ConnectionService events");
             connectionService.CommandOpened += OnCommandOpened;
         }
     }
 
-    private void OnUserAuth(object? sender, UserauthArgs args)
+    private void OnUserAuth(object? sender, UserAuthArgs args)
     {
         // Extract username and password for routing and backend auth
         _username = args.Username;
@@ -72,9 +80,18 @@ public class SftpSessionHandler : IDisposable
         // Check if password is available (will be null for public key auth)
         _password = args.Password;
 
-        var authMethod = string.IsNullOrEmpty(_password) ? "publickey" : "password";
-        _logger.LogDebug("SFTP auth attempt for user: {Username}, method: {Method}",
+        // Check if this is public key auth (FxSsh provides KeyAlgorithm and Fingerprint for pubkey auth)
+        var isPublicKeyAuth = !string.IsNullOrEmpty(args.KeyAlgorithm);
+        var authMethod = isPublicKeyAuth ? $"publickey ({args.KeyAlgorithm})" :
+                        (!string.IsNullOrEmpty(_password) ? "password" : "none");
+
+        _logger.LogInformation("SFTP auth attempt for user: {Username}, method: {Method}",
             _username, authMethod);
+
+        if (isPublicKeyAuth)
+        {
+            _logger.LogDebug("Public key fingerprint: {Fingerprint}", args.Fingerprint);
+        }
 
         // Resolve backend based on username
         var result = ResolveBackend(_username);
@@ -83,10 +100,40 @@ public class SftpSessionHandler : IDisposable
         {
             _backendServer = result.Server;
             _routeMapping = result.Route;
+
+            // For public key auth, validate the key against stored public key
+            if (isPublicKeyAuth)
+            {
+                // Check if route has a stored public key
+                if (string.IsNullOrEmpty(_routeMapping?.PublicKey))
+                {
+                    _logger.LogWarning("Public key auth rejected for {Username}: no public key configured in route. " +
+                        "Add the user's public key to the route mapping via the API.", _username);
+                    args.Result = false;
+                    _metrics?.RecordAuthentication(false, "SFTP", _backendServer?.Id);
+                    return;
+                }
+
+                // Validate the client's public key against stored key
+                var clientKeyString = FormatPublicKeyFromBlob(args.KeyAlgorithm!, args.Key);
+                if (!ValidatePublicKey(clientKeyString, _routeMapping.PublicKey))
+                {
+                    _logger.LogWarning("Public key auth rejected for {Username}: key mismatch. " +
+                        "Client key fingerprint: {Fingerprint}", _username, args.Fingerprint);
+                    args.Result = false;
+                    _metrics?.RecordAuthentication(false, "SFTP", _backendServer?.Id);
+                    return;
+                }
+
+                _usedPublicKeyAuth = true;
+                _logger.LogInformation("Public key auth accepted for {Username}, will use proxy service key for backend",
+                    _username);
+            }
+
             args.Result = true;
             _metrics?.RecordAuthentication(true, "SFTP", _backendServer?.Id);
             _metrics?.RecordConnectionOpened("SFTP", _backendServer?.Id);
-            _logger.LogDebug("SFTP authentication accepted for {Username}, routing to {Backend}",
+            _logger.LogInformation("SFTP authentication accepted for {Username}, routing to {Backend}",
                 _username, _backendServer?.Name);
         }
         else
@@ -95,6 +142,61 @@ public class SftpSessionHandler : IDisposable
             _metrics?.RecordAuthentication(false, "SFTP", null);
             _logger.LogWarning("SFTP authentication failed for {Username}: no route found", _username);
         }
+    }
+
+    /// <summary>
+    /// Formats the public key blob from FxSsh into OpenSSH format for comparison
+    /// </summary>
+    private static string FormatPublicKeyFromBlob(string algorithm, byte[] keyBlob)
+    {
+        var base64Key = Convert.ToBase64String(keyBlob);
+        return $"{algorithm} {base64Key}";
+    }
+
+    /// <summary>
+    /// Validates that the client's public key matches the stored public key
+    /// </summary>
+    private bool ValidatePublicKey(string clientKey, string storedKey)
+    {
+        // Normalize both keys for comparison
+        // Format: "algorithm base64data [comment]"
+        var clientParts = clientKey.Split(' ', 3);
+        var storedParts = storedKey.Split(' ', 3);
+
+        if (clientParts.Length < 2 || storedParts.Length < 2)
+        {
+            _logger.LogWarning("Invalid key format for comparison");
+            return false;
+        }
+
+        // Compare algorithm and key data (ignore comment)
+        var clientAlgo = clientParts[0];
+        var clientData = clientParts[1];
+        var storedAlgo = storedParts[0];
+        var storedData = storedParts[1];
+
+        // Handle algorithm name variations (e.g., ssh-rsa vs rsa-sha2-256)
+        var algorithmsMatch = clientAlgo.Equals(storedAlgo, StringComparison.OrdinalIgnoreCase) ||
+            (IsRsaAlgorithm(clientAlgo) && IsRsaAlgorithm(storedAlgo));
+
+        var keysMatch = clientData.Equals(storedData, StringComparison.Ordinal);
+
+        if (algorithmsMatch && keysMatch)
+        {
+            _logger.LogDebug("Public key validation successful");
+            return true;
+        }
+
+        _logger.LogDebug("Public key validation failed - Algorithm match: {AlgoMatch}, Key match: {KeyMatch}",
+            algorithmsMatch, keysMatch);
+        return false;
+    }
+
+    private static bool IsRsaAlgorithm(string algorithm)
+    {
+        return algorithm.Equals("ssh-rsa", StringComparison.OrdinalIgnoreCase) ||
+               algorithm.Equals("rsa-sha2-256", StringComparison.OrdinalIgnoreCase) ||
+               algorithm.Equals("rsa-sha2-512", StringComparison.OrdinalIgnoreCase);
     }
 
     private (bool Success, BackendServer? Server, RouteMapping? Route) ResolveBackend(string username)
@@ -133,17 +235,42 @@ public class SftpSessionHandler : IDisposable
             }
         }
 
-        // Fallback: Try to parse username as user@backend format
+        // Fallback: Try to parse username as user@backend format (e.g., "claplante@10.1.9.7")
+        // This allows direct testing without requiring database configuration
         var atIndex = username.LastIndexOf('@');
         if (atIndex > 0)
         {
             var user = username[..atIndex];
-            var backendName = username[(atIndex + 1)..];
+            var backendHost = username[(atIndex + 1)..];
 
-            _logger.LogDebug("Parsed username '{User}' targeting backend '{Backend}'", user, backendName);
+            _logger.LogInformation("Using direct backend connection: user='{User}' host='{Host}'", user, backendHost);
 
-            // In a real implementation, we'd look up the backend by name
-            // For development/testing, could create a test backend here
+            // Create a temporary backend server for this connection
+            var tempId = Guid.NewGuid().ToString();
+            var testBackend = new BackendServer
+            {
+                Id = tempId,
+                Name = $"Direct-{backendHost}",
+                Host = backendHost,
+                Port = 22, // Default SFTP port
+                Protocol = Core.Enums.Protocol.Sftp,
+                IsEnabled = true,
+                MaxConnections = 10,
+                ConnectionTimeoutMs = 30000
+            };
+
+            // Create a passthrough route (credentials passed directly)
+            var testRoute = new RouteMapping
+            {
+                Id = Guid.NewGuid().ToString(),
+                Username = user,
+                BackendServerId = tempId,
+                BackendUsername = null, // Will use the parsed username
+                BackendPassword = null, // Will use the client-provided password
+                IsEnabled = true
+            };
+
+            return (true, testBackend, testRoute);
         }
 
         return (false, null, null);
@@ -178,6 +305,9 @@ public class SftpSessionHandler : IDisposable
                 SendDataToClient,
                 _logger);
 
+            // Signal that the subsystem request is accepted
+            args.Agreed = true;
+
             _logger.LogInformation("SFTP proxy session established for {Username} -> {Backend}",
                 _username, _backendServer?.Name);
         }
@@ -201,6 +331,7 @@ public class SftpSessionHandler : IDisposable
                 return false;
             }
             _connectionAcquired = connectionTracker is not null;
+
             // Parse actual username if format is user@backend
             var parsedUsername = _username;
             var atIndex = _username.LastIndexOf('@');
@@ -209,34 +340,59 @@ public class SftpSessionHandler : IDisposable
                 parsedUsername = _username[..atIndex];
             }
 
-            // Use credential mapper to get proper credentials
-            var credentialMapper = _serviceProvider.GetService<ICredentialMapper>();
-            string backendUsername;
-            string backendPassword;
+            // Determine backend username
+            var backendUsername = _routeMapping.BackendUsername ?? parsedUsername;
 
-            if (credentialMapper is not null)
+            // Create authentication method based on how client authenticated
+            AuthenticationMethod authMethod;
+
+            if (_usedPublicKeyAuth)
             {
-                var credentials = credentialMapper.MapCredentialsAsync(
-                    parsedUsername,
-                    _password ?? string.Empty,
-                    _routeMapping,
-                    _backendServer,
-                    CancellationToken.None).GetAwaiter().GetResult();
+                // Client used public key auth - use proxy's service key to authenticate to backend
+                var proxyKeyService = _serviceProvider.GetService<ProxyKeyService>();
+                if (proxyKeyService is null)
+                {
+                    _logger.LogError("ProxyKeyService not available - cannot authenticate to backend with service key");
+                    return false;
+                }
 
-                backendUsername = credentials.Username;
-                backendPassword = credentials.Password;
+                _logger.LogInformation("Using proxy service key to authenticate to backend as {User}", backendUsername);
+
+                // Create private key from PEM
+                using var keyStream = new MemoryStream(Encoding.UTF8.GetBytes(proxyKeyService.PrivateKeyPem));
+                var privateKey = new PrivateKeyFile(keyStream);
+                authMethod = new PrivateKeyAuthenticationMethod(backendUsername, privateKey);
             }
             else
             {
-                // Fallback to direct passthrough
-                backendUsername = _routeMapping.BackendUsername ?? parsedUsername;
-                backendPassword = _routeMapping.BackendPassword ?? _password ?? string.Empty;
-            }
+                // Client used password auth - use credential mapper or passthrough
+                var credentialMapper = _serviceProvider.GetService<ICredentialMapper>();
+                string backendPassword;
 
-            if (string.IsNullOrEmpty(backendPassword))
-            {
-                _logger.LogWarning("No password available for backend authentication. " +
-                    "Client may have used public key auth which cannot be proxied to password-based backend.");
+                if (credentialMapper is not null)
+                {
+                    var credentials = credentialMapper.MapCredentialsAsync(
+                        parsedUsername,
+                        _password ?? string.Empty,
+                        _routeMapping,
+                        _backendServer,
+                        CancellationToken.None).GetAwaiter().GetResult();
+
+                    backendUsername = credentials.Username;
+                    backendPassword = credentials.Password;
+                }
+                else
+                {
+                    // Fallback to direct passthrough
+                    backendPassword = _routeMapping.BackendPassword ?? _password ?? string.Empty;
+                }
+
+                if (string.IsNullOrEmpty(backendPassword))
+                {
+                    _logger.LogWarning("No password available for backend authentication.");
+                }
+
+                authMethod = new PasswordAuthenticationMethod(backendUsername, backendPassword);
             }
 
             // Create SFTP connection to backend
@@ -244,7 +400,7 @@ public class SftpSessionHandler : IDisposable
                 _backendServer.Host,
                 _backendServer.Port,
                 backendUsername,
-                new PasswordAuthenticationMethod(backendUsername, backendPassword))
+                authMethod)
             {
                 Timeout = TimeSpan.FromMilliseconds(_backendServer.ConnectionTimeoutMs)
             };
@@ -252,8 +408,8 @@ public class SftpSessionHandler : IDisposable
             _backendClient = new SftpClient(connectionInfo);
             _backendClient.Connect();
 
-            _logger.LogInformation("Connected to backend SFTP server {Backend} as {User}",
-                _backendServer.Name, backendUsername);
+            _logger.LogInformation("Connected to backend SFTP server {Backend} as {User} (auth: {AuthMethod})",
+                _backendServer.Name, backendUsername, _usedPublicKeyAuth ? "proxy-key" : "password");
             return true;
         }
         catch (Exception ex)

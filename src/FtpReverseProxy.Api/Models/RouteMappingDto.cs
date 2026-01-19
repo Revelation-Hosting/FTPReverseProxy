@@ -9,6 +9,7 @@ public record RouteMappingDto(
     string BackendServerId,
     string? BackendServerName,
     string? BackendUsername,
+    string? PublicKey,
     bool IsEnabled,
     int Priority,
     string? Description,
@@ -23,6 +24,7 @@ public record CreateRouteMappingRequest(
     string BackendServerId,
     string? BackendUsername = null,
     string? BackendPassword = null,
+    string? PublicKey = null,
     bool IsEnabled = true,
     int Priority = 100,
     string? Description = null);
@@ -35,6 +37,7 @@ public record UpdateRouteMappingRequest(
     string BackendServerId,
     string? BackendUsername,
     string? BackendPassword,
+    string? PublicKey,
     bool IsEnabled,
     int Priority,
     string? Description);

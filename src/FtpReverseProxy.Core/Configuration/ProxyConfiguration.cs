@@ -49,6 +49,47 @@ public class ProxyConfiguration
     /// Graceful shutdown configuration
     /// </summary>
     public ShutdownConfiguration Shutdown { get; set; } = new();
+
+    /// <summary>
+    /// TCP relay configurations for transparent proxying (like NGINX streams)
+    /// </summary>
+    public List<TcpRelayConfiguration> TcpRelays { get; set; } = new();
+}
+
+/// <summary>
+/// Configuration for a TCP relay (transparent proxy)
+/// </summary>
+public class TcpRelayConfiguration
+{
+    /// <summary>
+    /// Friendly name for this relay
+    /// </summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether this relay is enabled
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// IP address to listen on
+    /// </summary>
+    public string ListenAddress { get; set; } = "0.0.0.0";
+
+    /// <summary>
+    /// Port to listen on
+    /// </summary>
+    public int ListenPort { get; set; }
+
+    /// <summary>
+    /// Backend server hostname or IP
+    /// </summary>
+    public string BackendHost { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Backend server port
+    /// </summary>
+    public int BackendPort { get; set; }
 }
 
 /// <summary>

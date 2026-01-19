@@ -10,6 +10,13 @@ public class RouteMappingEntity
     public required string BackendServerId { get; set; }
     public string? BackendUsername { get; set; }
     public string? BackendPassword { get; set; }
+
+    /// <summary>
+    /// SSH public key for key-based authentication (e.g., "ssh-ed25519 AAAAC3NzaC...")
+    /// When set, the proxy validates the client's key before connecting to backend
+    /// </summary>
+    public string? PublicKey { get; set; }
+
     public bool IsEnabled { get; set; } = true;
     public int Priority { get; set; } = 100;
     public string? Description { get; set; }

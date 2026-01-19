@@ -33,6 +33,12 @@ public class RouteMapping
     public string? BackendPassword { get; set; }
 
     /// <summary>
+    /// SSH public key for key-based authentication (e.g., "ssh-ed25519 AAAAC3NzaC...")
+    /// When set, the proxy validates the client's key before connecting to backend using the proxy's service key
+    /// </summary>
+    public string? PublicKey { get; set; }
+
+    /// <summary>
     /// Whether this route mapping is enabled
     /// </summary>
     public bool IsEnabled { get; set; } = true;

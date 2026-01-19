@@ -238,6 +238,76 @@ SFTP uses SSH, which doesn't support SNI. For multi-domain SFTP:
 - **Document the fingerprint** - Tell users to accept the proxy's host key
 - **Routing still works** - Username-based routing functions normally
 
+### SFTP Public Key Authentication
+
+The SFTP proxy supports public key authentication with broad algorithm coverage:
+
+| Algorithm | Status | User Coverage |
+|-----------|--------|---------------|
+| **ed25519** | ✅ Supported | ~30-40% |
+| **RSA (SHA-2)** | ✅ Supported | ~55-65% |
+| **ECDSA** | ✅ Supported | ~3-5% |
+
+**Total: ~95%+ of SSH users are supported**
+
+#### How It Works
+
+1. **Client authenticates to proxy** with their public key (ed25519, RSA, or ECDSA)
+2. **Proxy validates** the key against the stored public key in the route mapping
+3. **Proxy authenticates to backend** using its own service key (auto-generated RSA 4096-bit)
+
+This allows secure passwordless authentication without sharing user private keys with backends.
+
+#### RFC 8308 Support (server-sig-algs)
+
+The proxy implements RFC 8308 `ext-info-s` extension, which advertises supported signature algorithms to clients:
+
+```
+server-sig-algs=ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-256,rsa-sha2-512
+```
+
+This enables modern SSH clients to use `rsa-sha2-256` and `rsa-sha2-512` signatures instead of the deprecated `ssh-rsa` (SHA-1).
+
+#### Configuring Public Key Authentication
+
+1. **Add the user's public key to their route mapping**:
+
+```bash
+curl -X PUT "http://localhost:8080/api/routes/{route-id}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "john",
+    "backendServerId": "backend-id",
+    "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host",
+    "isEnabled": true
+  }'
+```
+
+2. **Install the proxy's public key on the backend server**:
+
+The proxy auto-generates a service key pair on first run. Retrieve the public key:
+
+```bash
+# From the proxy container
+docker exec ftp-reverse-proxy cat /app/keys/proxy_key.pub
+```
+
+Add this key to the backend user's `~/.ssh/authorized_keys`.
+
+3. **Client connects using their key**:
+
+```bash
+sftp -i ~/.ssh/id_ed25519 -P 2222 john@proxy-host
+```
+
+#### Proxy Service Key
+
+The proxy generates an RSA 4096-bit key pair stored at `/app/keys/`:
+- `proxy_key` - Private key (keep secure)
+- `proxy_key.pub` - Public key (install on backends)
+
+Mount a persistent volume for `/app/keys` to preserve the key across container restarts.
+
 ## Configuration
 
 ### Full Configuration Example
@@ -432,6 +502,7 @@ DELETE /api/routes/{id}
 - `backendServerId`: ID of the target backend server
 - `backendUsername`: (Optional) Username to use when connecting to backend
 - `backendPassword`: (Optional) Password to use when connecting to backend
+- `publicKey`: (Optional) User's SSH public key for SFTP public key auth (OpenSSH format)
 - `priority`: Lower values = higher priority (default: 100)
 - `isEnabled`: Whether this route is active
 

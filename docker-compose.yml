@@ -17,6 +17,11 @@ services:
       - AutoMigrate=true
       - ConnectionStrings__DefaultConnection=Host=postgres;Database=ftpproxy;Username=ftpproxy;Password=ftpproxy
       - DatabaseProvider=PostgreSQL
+      # Shared key directory for proxy service keypair
+      - PROXY_KEY_DIRECTORY=/app/keys
+    volumes:
+      # Share proxy service keys with the proxy service
+      - proxy-keys:/app/keys
     depends_on:
       postgres:
         condition: service_healthy
@@ -40,8 +45,10 @@ services:
       - "21:21"
       # FTPS implicit port (uncomment when certificate is configured)
       # - "990:990"
-      # SFTP port (uncomment when host key is configured)
-      # - "2222:22"  # Using 2222 to avoid conflict with host SSH
+      # SFTP port (protocol-aware proxy with username routing)
+      - "2222:22"  # Using 2222 to avoid conflict with host SSH
+      # SFTP transparent relay (direct TCP relay - client auth goes to backend)
+      - "2223:2223"
       # Data channel port range for passive mode
       # Using 30000-30100 to avoid conflicts with Windows ephemeral ports (49152-65535)
       - "30000-30100:30000-30100"
@@ -58,8 +65,17 @@ services:
       # FTPS Implicit (disabled until certificate is configured)
       - Proxy__FtpsImplicit__Enabled=false
 
-      # SFTP (disabled until host key is configured)
-      - Proxy__Sftp__Enabled=false
+      # SFTP (protocol-aware proxy - requires username routing config)
+      - Proxy__Sftp__Enabled=true
+      - Proxy__Sftp__Port=22
+
+      # TCP Relay for transparent SFTP (backend handles all auth)
+      - Proxy__TcpRelays__0__Name=Ubuntu-SFTP-Relay
+      - Proxy__TcpRelays__0__Enabled=true
+      - Proxy__TcpRelays__0__ListenAddress=0.0.0.0
+      - Proxy__TcpRelays__0__ListenPort=2223
+      - Proxy__TcpRelays__0__BackendHost=10.1.9.7
+      - Proxy__TcpRelays__0__BackendPort=22
 
       # Data Channel
       - Proxy__DataChannel__MinPort=30000
@@ -81,9 +97,14 @@ services:
       # TLS Certificate for client connections
       - Proxy__TlsCertificate__Path=/app/certs/server.pfx
       - Proxy__TlsCertificate__Password=changeit
+
+      # Proxy service key directory (generated keypair for authenticating to backends)
+      - PROXY_KEY_DIRECTORY=/app/keys
     volumes:
       # Mount certificates directory
       - ./certs:/app/certs:ro
+      # Share proxy service keys with the API
+      - proxy-keys:/app/keys
       # Optional: Override configuration file
       # - ./appsettings.Production.json:/app/appsettings.Production.json:ro
     depends_on:
@@ -128,6 +149,7 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  proxy-keys:
 
 networks:
   ftp-proxy-network:

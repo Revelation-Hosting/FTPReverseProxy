@@ -78,6 +78,7 @@ public class RouteMappingRepository : IRouteMappingRepository
         entity.BackendServerId = mapping.BackendServerId;
         entity.BackendUsername = mapping.BackendUsername;
         entity.BackendPassword = mapping.BackendPassword;
+        entity.PublicKey = mapping.PublicKey;
         entity.IsEnabled = mapping.IsEnabled;
         entity.Priority = mapping.Priority;
         entity.Description = mapping.Description;
@@ -117,6 +118,7 @@ public class RouteMappingRepository : IRouteMappingRepository
         BackendServerId = entity.BackendServerId,
         BackendUsername = entity.BackendUsername,
         BackendPassword = entity.BackendPassword,
+        PublicKey = entity.PublicKey,
         IsEnabled = entity.IsEnabled,
         Priority = entity.Priority,
         Description = entity.Description,
@@ -131,6 +133,7 @@ public class RouteMappingRepository : IRouteMappingRepository
         BackendServerId = model.BackendServerId,
         BackendUsername = model.BackendUsername,
         BackendPassword = model.BackendPassword,
+        PublicKey = model.PublicKey,
         IsEnabled = model.IsEnabled,
         Priority = model.Priority,
         Description = model.Description,
