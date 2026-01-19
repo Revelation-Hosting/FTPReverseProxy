@@ -83,6 +83,9 @@ namespace FtpReverseProxy.Data.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<bool>("SkipCertificateValidation")
+                        .HasColumnType("boolean");
+
                     b.HasKey("Id");
 
                     b.HasIndex("IsEnabled");
@@ -127,6 +130,10 @@ namespace FtpReverseProxy.Data.Migrations
 
                     b.Property<int>("Priority")
                         .HasColumnType("integer");
+
+                    b.Property<string>("PublicKey")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
 
                     b.Property<string>("Username")
                         .IsRequired()

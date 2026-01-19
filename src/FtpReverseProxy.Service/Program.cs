@@ -66,8 +66,11 @@ try
         options.CertificatePassword = proxyConfig.TlsCertificate.Password;
     });
 
-    // Add SFTP services
-    builder.Services.AddSftpProxyServices();
+    // Add SFTP services with key directory configuration
+    var keyDirectory = builder.Configuration.GetValue<string>("ProxyKeyDirectory")
+        ?? Environment.GetEnvironmentVariable("PROXY_KEY_DIRECTORY")
+        ?? Path.Combine(AppContext.BaseDirectory, "keys");
+    builder.Services.AddSftpProxyServices(keyDirectory);
 
     builder.Services.AddHostedService<Worker>();
 

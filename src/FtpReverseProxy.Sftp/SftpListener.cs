@@ -80,40 +80,14 @@ public class SftpListener : IProxyListener
         // Generate RSA key for SSH server
         using var rsa = RSA.Create(2048);
 
-        // FxSsh expects base64-encoded key parameters
-        // Format: modulus, exponent, d, p, q, dp, dq, inverseQ
-        var keyParams = rsa.ExportParameters(true);
-        var keyBlob = SerializeRsaPrivateKey(keyParams);
+        // FxSsh expects PEM-formatted private keys
+        var rsaPem = rsa.ExportRSAPrivateKeyPem();
 
-        _server.AddHostKey("ssh-rsa", Convert.ToBase64String(keyBlob));
+        // Register the key with both rsa-sha2-256 and rsa-sha2-512 algorithms
+        _server.AddHostKey("rsa-sha2-256", rsaPem);
+        _server.AddHostKey("rsa-sha2-512", rsaPem);
 
-        _logger.LogDebug("Host key configured for SFTP server");
-    }
-
-    private static byte[] SerializeRsaPrivateKey(RSAParameters key)
-    {
-        using var ms = new MemoryStream();
-        using var writer = new BinaryWriter(ms);
-
-        // Write each component with length prefix (big-endian)
-        WriteMpint(writer, key.Modulus!);
-        WriteMpint(writer, key.Exponent!);
-        WriteMpint(writer, key.D!);
-        WriteMpint(writer, key.P!);
-        WriteMpint(writer, key.Q!);
-        WriteMpint(writer, key.DP!);
-        WriteMpint(writer, key.DQ!);
-        WriteMpint(writer, key.InverseQ!);
-
-        return ms.ToArray();
-    }
-
-    private static void WriteMpint(BinaryWriter writer, byte[] data)
-    {
-        // SSH mpint format: 4-byte big-endian length + data
-        var length = IPAddress.HostToNetworkOrder(data.Length);
-        writer.Write(length);
-        writer.Write(data);
+        _logger.LogInformation("RSA host key configured for SFTP server");
     }
 
     private void OnConnectionAccepted(object? sender, Session session)

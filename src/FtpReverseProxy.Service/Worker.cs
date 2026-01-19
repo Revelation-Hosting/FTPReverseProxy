@@ -1,5 +1,6 @@
 using FtpReverseProxy.Core.Configuration;
 using FtpReverseProxy.Core.Interfaces;
+using FtpReverseProxy.Core.TcpRelay;
 using FtpReverseProxy.Ftp;
 using FtpReverseProxy.Sftp;
 using Microsoft.Extensions.Options;
@@ -123,7 +124,7 @@ public class Worker : BackgroundService
             }
         }
 
-        // Start SFTP listener
+        // Start SFTP listener (protocol-aware proxy with username routing)
         if (_config.Sftp.Enabled)
         {
             var sftpListener = new SftpListener(
@@ -136,7 +137,30 @@ public class Worker : BackgroundService
             _listeners.Add(sftpListener);
             _ = sftpListener.StartAsync(stoppingToken);
 
-            _logger.LogInformation("SFTP listener started (note: full SFTP proxying requires additional implementation)");
+            _logger.LogInformation("SFTP listener started (protocol-aware proxy with username routing)");
+        }
+
+        // Start TCP relay listeners (transparent proxying - like NGINX streams)
+        var metrics = _serviceProvider.GetService<IProxyMetrics>();
+        foreach (var relayConfig in _config.TcpRelays.Where(r => r.Enabled))
+        {
+            if (string.IsNullOrEmpty(relayConfig.BackendHost))
+            {
+                _logger.LogWarning("TCP Relay '{Name}' has no backend host configured. Skipping.", relayConfig.Name);
+                continue;
+            }
+
+            var relayListener = new TcpRelayListener(
+                relayConfig.ListenAddress,
+                relayConfig.ListenPort,
+                relayConfig.BackendHost,
+                relayConfig.BackendPort,
+                relayConfig.Name,
+                _serviceProvider.GetRequiredService<ILogger<TcpRelayListener>>(),
+                metrics);
+
+            _listeners.Add(relayListener);
+            _ = relayListener.StartAsync(stoppingToken);
         }
 
         _logger.LogInformation("Started {Count} listener(s)", _listeners.Count);

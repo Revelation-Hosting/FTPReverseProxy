@@ -43,6 +43,7 @@ public class FtpProxyDbContext : DbContext
             entity.Property(e => e.BackendServerId).HasMaxLength(50).IsRequired();
             entity.Property(e => e.BackendUsername).HasMaxLength(255);
             entity.Property(e => e.BackendPassword).HasMaxLength(500);
+            entity.Property(e => e.PublicKey).HasMaxLength(1000);
             entity.Property(e => e.Description).HasMaxLength(1000);
 
             entity.HasIndex(e => e.Username);

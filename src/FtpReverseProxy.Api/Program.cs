@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using FtpReverseProxy.Api.Models;
+using FtpReverseProxy.Core.Services;
 using FtpReverseProxy.Data;
 using FtpReverseProxy.Data.Entities;
 using FtpReverseProxy.Data.Services;
@@ -50,6 +51,17 @@ else
     // Use in-memory cache if Redis not configured
     builder.Services.AddDistributedMemoryCache();
 }
+
+// Register ProxyKeyService for reading the proxy's public key
+// Key directory should be shared between API and Service containers
+var keyDirectory = builder.Configuration.GetValue<string>("ProxyKeyDirectory")
+    ?? Environment.GetEnvironmentVariable("PROXY_KEY_DIRECTORY")
+    ?? Path.Combine(AppContext.BaseDirectory, "keys");
+builder.Services.AddSingleton(sp =>
+{
+    var logger = sp.GetRequiredService<ILogger<ProxyKeyService>>();
+    return new ProxyKeyService(logger, keyDirectory);
+});
 
 builder.Services.AddOpenApi();
 
@@ -309,6 +321,7 @@ app.MapGet("/api/routes", async (FtpProxyDbContext db, string? username, string?
             r.BackendServerId,
             r.BackendServer != null ? r.BackendServer.Name : null,
             r.BackendUsername,
+            r.PublicKey,
             r.IsEnabled,
             r.Priority,
             r.Description,
@@ -333,6 +346,7 @@ app.MapGet("/api/routes/{id}", async (string id, FtpProxyDbContext db) =>
             r.BackendServerId,
             r.BackendServer != null ? r.BackendServer.Name : null,
             r.BackendUsername,
+            r.PublicKey,
             r.IsEnabled,
             r.Priority,
             r.Description,
@@ -361,6 +375,7 @@ app.MapPost("/api/routes", async (CreateRouteMappingRequest request, FtpProxyDbC
         BackendServerId = request.BackendServerId,
         BackendUsername = request.BackendUsername,
         BackendPassword = request.BackendPassword,
+        PublicKey = request.PublicKey,
         IsEnabled = request.IsEnabled,
         Priority = request.Priority,
         Description = request.Description,
@@ -381,6 +396,7 @@ app.MapPost("/api/routes", async (CreateRouteMappingRequest request, FtpProxyDbC
         route.BackendServerId,
         backendName,
         route.BackendUsername,
+        route.PublicKey,
         route.IsEnabled,
         route.Priority,
         route.Description,
@@ -413,6 +429,7 @@ app.MapPut("/api/routes/{id}", async (string id, UpdateRouteMappingRequest reque
     route.BackendServerId = request.BackendServerId;
     route.BackendUsername = request.BackendUsername;
     route.BackendPassword = request.BackendPassword;
+    route.PublicKey = request.PublicKey;
     route.IsEnabled = request.IsEnabled;
     route.Priority = request.Priority;
     route.Description = request.Description;
@@ -472,6 +489,7 @@ app.MapGet("/api/routes/lookup/{username}", async (string username, FtpProxyDbCo
             BackendPort = r.BackendServer.Port,
             Protocol = r.BackendServer.Protocol,
             r.BackendUsername,
+            r.PublicKey,
             r.BackendServer.CredentialMapping,
             r.BackendServer.ServiceAccountUsername,
             r.BackendServer.ConnectionTimeoutMs
@@ -482,6 +500,45 @@ app.MapGet("/api/routes/lookup/{username}", async (string username, FtpProxyDbCo
 })
 .WithName("LookupRoute")
 .WithTags("Route Mappings")
+;
+
+// ==================== Proxy Service Key API ====================
+
+app.MapGet("/api/proxy/public-key", (ProxyKeyService keyService) =>
+{
+    try
+    {
+        var publicKey = keyService.PublicKey;
+        return Results.Ok(new
+        {
+            publicKey,
+            instructions = "Add this public key to the authorized_keys file on your backend servers. " +
+                          "This allows the proxy to authenticate to backends on behalf of users who authenticate with their own SSH keys."
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Failed to retrieve proxy public key: {ex.Message}");
+    }
+})
+.WithName("GetProxyPublicKey")
+.WithTags("Proxy Configuration")
+;
+
+app.MapGet("/api/proxy/public-key/raw", (ProxyKeyService keyService) =>
+{
+    try
+    {
+        var publicKey = keyService.PublicKey;
+        return Results.Text(publicKey, "text/plain");
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Failed to retrieve proxy public key: {ex.Message}");
+    }
+})
+.WithName("GetProxyPublicKeyRaw")
+.WithTags("Proxy Configuration")
 ;
 
 app.Run();

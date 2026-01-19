@@ -444,11 +444,33 @@ public class SftpProxy : IDisposable
 
         try
         {
+            // Check if directory already exists (race condition with parallel connections)
+            if (_backend.Exists(path))
+            {
+                var existingAttrs = _backend.GetAttributes(path);
+                if (existingAttrs.IsDirectory)
+                {
+                    // Directory already exists - treat as success
+                    SendStatus(requestId, SftpStatusCode.Ok, "Success");
+                    return;
+                }
+                // Path exists but is a file
+                SendStatus(requestId, SftpStatusCode.Failure, "Path exists and is not a directory");
+                return;
+            }
+
             _backend.CreateDirectory(path);
             SendStatus(requestId, SftpStatusCode.Ok, "Success");
         }
         catch (Exception ex)
         {
+            // Also handle race condition where directory was created between Exists check and CreateDirectory
+            if (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase) ||
+                ex.Message.Contains("file exists", StringComparison.OrdinalIgnoreCase))
+            {
+                SendStatus(requestId, SftpStatusCode.Ok, "Success");
+                return;
+            }
             _logger.LogError(ex, "Error creating directory: {Path}", path);
             SendStatusError(requestId, ex);
         }
@@ -650,12 +672,17 @@ public class SftpProxy : IDisposable
             access = flags.HasFlag(SftpOpenFlags.Read) ? FileAccess.ReadWrite : FileAccess.Write;
         }
 
-        if (flags.HasFlag(SftpOpenFlags.Create))
+        // Handle Create + Truncate combination (common for uploads)
+        // FileMode.Create = create new file or truncate existing
+        if (flags.HasFlag(SftpOpenFlags.Create) && flags.HasFlag(SftpOpenFlags.Truncate))
+        {
+            mode = FileMode.Create;
+        }
+        else if (flags.HasFlag(SftpOpenFlags.Create))
         {
             mode = flags.HasFlag(SftpOpenFlags.Exclusive) ? FileMode.CreateNew : FileMode.OpenOrCreate;
         }
-
-        if (flags.HasFlag(SftpOpenFlags.Truncate))
+        else if (flags.HasFlag(SftpOpenFlags.Truncate))
         {
             mode = FileMode.Truncate;
         }
